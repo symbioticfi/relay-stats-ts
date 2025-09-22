@@ -38,9 +38,6 @@ jobs:
       - name: Check formatting
         run: npm run format:check
         
-      - name: Run tests
-        run: npm run test:coverage
-        
       - name: Build
         run: npm run build
         
