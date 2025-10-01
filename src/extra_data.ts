@@ -102,8 +102,12 @@ async function mimcHashValidators(
   const moduleName: string = 'circomlibjs';
   const mod: unknown = await import(moduleName);
   // The package is CommonJS; ESM default interop varies by runtime
-  const circomlib = (mod as Record<string, unknown>) as Record<string, unknown> & { default?: Record<string, unknown> };
-  const resolved = (circomlib.default ?? circomlib) as { mimc7: { multiHash: (arr: Array<bigint | number>, key: bigint) => unknown } };
+  const circomlib = mod as Record<string, unknown> as Record<string, unknown> & {
+    default?: Record<string, unknown>;
+  };
+  const resolved = (circomlib.default ?? circomlib) as {
+    mimc7: { multiHash: (arr: Array<bigint | number>, key: bigint) => unknown };
+  };
   const mimc = resolved.mimc7;
   const inputs: bigint[] = [];
   for (const t of tuples) {
@@ -128,7 +132,10 @@ async function mimcHashValidators(
     inputs.push(bytes8ToBigInt(vpBytes.slice(0, 8)));
   }
   const outUnknown: unknown = mimc.multiHash(inputs, 0n);
-  const bi: bigint = typeof outUnknown === 'bigint' ? outUnknown : BigInt((outUnknown as { toString: () => string }).toString());
+  const bi: bigint =
+    typeof outUnknown === 'bigint'
+      ? outUnknown
+      : BigInt((outUnknown as { toString: () => string }).toString());
   return ('0x' + bi.toString(16).padStart(64, '0')) as Hex;
 }
 

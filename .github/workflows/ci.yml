@@ -7,11 +7,12 @@ on:
     branches: [main]
 
 jobs:
-  test:
+  lint_build:
+    name: Lint, Format, Build (Node.js ${{ matrix.node-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18.x, 20.x]
+        node-version: [20.x]
     
     steps:
       - uses: actions/checkout@v4

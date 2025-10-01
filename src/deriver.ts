@@ -25,8 +25,19 @@ import {
 import { sszTreeRoot } from './ssz.js';
 // bytesToHex retained in public API exports; not used internally here
 import { buildSimpleExtraData, buildZkExtraData } from './extra_data.js';
-import { VALSET_VERSION, SSZ_MAX_VALIDATORS, SSZ_MAX_VAULTS, AGGREGATOR_MODE, AggregatorMode } from './constants.js';
-import { VALSET_DRIVER_ABI, SETTLEMENT_ABI, VOTING_POWER_PROVIDER_ABI, KEY_REGISTRY_ABI } from './abi.js';
+import {
+  VALSET_VERSION,
+  SSZ_MAX_VALIDATORS,
+  SSZ_MAX_VAULTS,
+  AGGREGATOR_MODE,
+  AggregatorMode,
+} from './constants.js';
+import {
+  VALSET_DRIVER_ABI,
+  SETTLEMENT_ABI,
+  VOTING_POWER_PROVIDER_ABI,
+  KEY_REGISTRY_ABI,
+} from './abi.js';
 
 // Map a boolean preference to a BlockTag for viem reads
 function toBlockTag(finalized: boolean): 'finalized' | 'latest' {
@@ -292,7 +303,6 @@ export class ValidatorSetDeriver {
 
   // withPreferredBlockTag removed; use explicit { blockTag: toBlockTag(...) }
 
-
   private async getFromCache(key: string): Promise<any | null> {
     if (!this.cache) return null;
     try {
@@ -551,10 +561,9 @@ export class ValidatorSetDeriver {
       client,
     });
 
-    const votingPowers = await providerContract.read.getVotingPowersAt(
-      [[], Number(timestamp)],
-      { blockTag: toBlockTag(preferFinalized) },
-    );
+    const votingPowers = await providerContract.read.getVotingPowersAt([[], Number(timestamp)], {
+      blockTag: toBlockTag(preferFinalized),
+    });
 
     return votingPowers.map((vp: any) => ({
       operator: vp.operator as Address,
@@ -760,10 +769,9 @@ export class ValidatorSetDeriver {
           break;
         }
 
-        const headerHash = (await settlementContract.read.getValSetHeaderHashAt(
-          [Number(epoch)],
-          { blockTag: toBlockTag(preferFinalized) },
-        )) as Hex;
+        const headerHash = (await settlementContract.read.getValSetHeaderHashAt([Number(epoch)], {
+          blockTag: toBlockTag(preferFinalized),
+        })) as Hex;
         if (headerHash) {
           hashes.set(`${settlement.chainId}_${settlement.address}`, headerHash);
         }
@@ -785,7 +793,7 @@ export class ValidatorSetDeriver {
       settlementStatus = 'committed';
     } else if (epoch < lastCommitted) {
       settlementStatus = 'missing';
-    } else  {
+    } else {
       settlementStatus = 'pending';
     }
 

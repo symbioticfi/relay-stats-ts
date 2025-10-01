@@ -9,8 +9,7 @@ export const AGGREGATOR_MODE = {
   SIMPLE: 'simple',
   ZK: 'zk',
 } as const;
-export type AggregatorMode =
-  (typeof AGGREGATOR_MODE)[keyof typeof AGGREGATOR_MODE];
+export type AggregatorMode = (typeof AGGREGATOR_MODE)[keyof typeof AGGREGATOR_MODE];
 
 // Extra data key names (moved from extra_data.ts for reuse)
 export const EXTRA_NAME = {

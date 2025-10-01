@@ -64,7 +64,13 @@ export const VALSET_DRIVER_ABI = [
     ],
     stateMutability: 'view',
   },
-  { inputs: [], name: 'getCurrentEpoch', outputs: [{ name: '', type: 'uint256' }], stateMutability: 'view', type: 'function' },
+  {
+    inputs: [],
+    name: 'getCurrentEpoch',
+    outputs: [{ name: '', type: 'uint256' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
   {
     type: 'function',
     name: 'getEpochStart',
@@ -72,8 +78,20 @@ export const VALSET_DRIVER_ABI = [
     outputs: [{ name: '', type: 'uint48', internalType: 'uint48' }],
     stateMutability: 'view',
   },
-  { inputs: [], name: 'SUBNETWORK', outputs: [{ name: '', type: 'bytes32' }], stateMutability: 'view', type: 'function' },
-  { inputs: [], name: 'NETWORK', outputs: [{ name: '', type: 'address' }], stateMutability: 'view', type: 'function' },
+  {
+    inputs: [],
+    name: 'SUBNETWORK',
+    outputs: [{ name: '', type: 'bytes32' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [],
+    name: 'NETWORK',
+    outputs: [{ name: '', type: 'address' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
 ] as const;
 
 export const SETTLEMENT_ABI = [
