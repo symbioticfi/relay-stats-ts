@@ -2,11 +2,11 @@
     "name": "relay-stats-ts-example",
     "version": "1.0.0",
     "description": "Example usage of the @symbioticfi/relay-stats-ts library",
+    "type": "module",
     "main": "example.js",
     "scripts": {
-        "start": "ts-node example.ts",
-        "build": "tsc",
-        "example": "node dist/example.js"
+        "start": "node --loader ts-node/esm example.ts",
+        "build": "tsc"
     },
     "dependencies": {
         "@symbioticfi/relay-stats-ts": "file:..",

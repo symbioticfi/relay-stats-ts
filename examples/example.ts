@@ -1,8 +1,7 @@
 // example/example.ts
-import { 
-    ValidatorSetDeriver,
-    ValidatorSet
-  } from '@symbioticfi/relay-stats-ts';
+import { ValidatorSetDeriver } from '@symbioticfi/relay-stats-ts';
+import type { ValidatorSet } from '@symbioticfi/relay-stats-ts';
+import { fileURLToPath } from 'url';
   
   /**
    * Main example demonstrating validator set derivation
@@ -206,8 +205,9 @@ import {
     }
   }
   
-  // Run the example
-  if (require.main === module) {
+  // Run the example (ESM-friendly main check)
+  const isMainModule = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+  if (isMainModule) {
     main().catch(console.error);
   }
   
