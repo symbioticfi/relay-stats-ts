@@ -52,11 +52,19 @@ export interface ValidatorSet {
   quorumThreshold: bigint;
   validators: Validator[];
   totalVotingPower: bigint;
-  validatorsSszMRoot?: Hex;
   settlementStatus: 'committed' | 'pending' | 'missing';
   integrityStatus: 'valid' | 'invalid';
 }
 
+export interface ValidatorSetHeader {
+  version: number;
+  requiredKeyTag: number;
+  epoch: number;
+  captureTimestamp: number;
+  quorumThreshold: bigint;
+  totalVotingPower: bigint;
+  validatorsSszMRoot: Hex;
+}
 
 export interface OperatorVotingPower {
   operator: Address;
@@ -89,11 +97,20 @@ export interface NetworkData {
   eip712Data: Eip712Domain;
 }
 
+// Aggregator extra data entry (key/value are bytes32)
+export interface AggregatorExtraDataEntry {
+  key: Hex;
+  value: Hex;
+}
+
 export interface CacheInterface {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   get(key: string): Promise<any | null>;
+
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   set(key: string, value: any): Promise<void>;
+
   delete(key: string): Promise<void>;
+
   clear(): Promise<void>;
 }

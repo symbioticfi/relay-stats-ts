@@ -2,6 +2,7 @@
     "name": "@symbioticfi/relay-stats-ts",
     "version": "1.0.0",
     "description": "TypeScript library for deriving validator sets from Symbiotic network contracts",
+    "type": "module",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
     "files": [
@@ -45,6 +46,9 @@
     },
     "homepage": "https://github.com/symbioticfi/valset-derivation#readme",
     "dependencies": {
+        "@chainsafe/ssz": "^1.2.2",
+        "big-integer": "^1.6.52",
+        "circomlibjs": "^0.0.8",
         "viem": "^2.36.0"
     },
     "devDependencies": {
@@ -58,9 +62,9 @@
         "jiti": "^2.5.1",
         "lint-staged": "^15.0.0",
         "prettier": "^3.0.0",
+        "ts-node": "^10.9.1",
         "typescript": "^5.0.0",
-        "typescript-eslint": "^8.44.0",
-        "ts-node": "^10.9.1"
+        "typescript-eslint": "^8.44.0"
     },
     "lint-staged": {
         "*.ts": [

@@ -1,5 +1,14 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { createPublicClient, http, PublicClient, Address, Hex, getContract } from 'viem';
+import {
+  createPublicClient,
+  http,
+  PublicClient,
+  Address,
+  Hex,
+  getContract,
+  encodeAbiParameters,
+  keccak256,
+} from 'viem';
 import {
   CrossChainAddress,
   NetworkConfig,
@@ -8,16 +17,21 @@ import {
   OperatorVotingPower,
   OperatorWithKeys,
   CacheInterface,
-} from './types';
-import {
-  VALSET_VERSION,
-  SSZ_MAX_VALIDATORS,
-  SSZ_MAX_VAULTS,
-  VALSET_DRIVER_ABI,
-  SETTLEMENT_ABI,
-  VOTING_POWER_PROVIDER_ABI,
-  KEY_REGISTRY_ABI,
-} from './constants';
+  ValidatorSetHeader,
+  NetworkData,
+  Eip712Domain,
+  AggregatorExtraDataEntry,
+} from './types.js';
+import { sszTreeRoot } from './ssz.js';
+// bytesToHex retained in public API exports; not used internally here
+import { buildSimpleExtraData, buildZkExtraData } from './extra_data.js';
+import { VALSET_VERSION, SSZ_MAX_VALIDATORS, SSZ_MAX_VAULTS, AGGREGATOR_MODE, AggregatorMode } from './constants.js';
+import { VALSET_DRIVER_ABI, SETTLEMENT_ABI, VOTING_POWER_PROVIDER_ABI, KEY_REGISTRY_ABI } from './abi.js';
+
+// Map a boolean preference to a BlockTag for viem reads
+function toBlockTag(finalized: boolean): 'finalized' | 'latest' {
+  return finalized ? 'finalized' : 'latest';
+}
 
 export interface ValidatorSetDeriverConfig {
   rpcUrls: string[];
@@ -40,6 +54,141 @@ export class ValidatorSetDeriver {
     this.maxSavedEpochs = config.maxSavedEpochs || 100;
     this.rpcUrls = config.rpcUrls;
     this.initializedPromise = this.initializeClients();
+  }
+
+  /**
+   * Derive auxiliary network data used by the Relay system.
+   * - Reads NETWORK and SUBNETWORK from the ValSet Driver
+   * - Reads EIP-712 domain from a given settlement contract
+   */
+  async getNetworkData(
+    settlement?: CrossChainAddress,
+    finalized: boolean = true,
+  ): Promise<NetworkData> {
+    await this.ensureInitialized();
+
+    const driver = this.getDriverContract();
+
+    // Read network address and subnetwork id from the driver
+    const [networkAddress, subnetwork] = await Promise.all([
+      driver.read.NETWORK({ blockTag: toBlockTag(finalized) }),
+      driver.read.SUBNETWORK({ blockTag: toBlockTag(finalized) }),
+    ]);
+
+    // Resolve settlement: use provided or first from config
+    let targetSettlement: CrossChainAddress | undefined = settlement;
+    if (!targetSettlement) {
+      const cfg = await this.getNetworkConfig(undefined, finalized);
+      targetSettlement = cfg.settlements[0];
+    }
+    if (!targetSettlement) {
+      throw new Error('No settlement available to fetch EIP-712 domain');
+    }
+
+    // Read EIP-712 domain from the settlement contract on its chain
+    const settlementClient = this.getClient(targetSettlement.chainId);
+    const settlementContract = getContract({
+      address: targetSettlement.address,
+      abi: SETTLEMENT_ABI,
+      client: settlementClient,
+    });
+
+    const domainTuple = await settlementContract.read.eip712Domain({
+      blockTag: toBlockTag(finalized),
+    });
+
+    const [fields, name, version, chainId, verifyingContract, salt, extensions] =
+      domainTuple as readonly [Hex, string, string, bigint, Address, Hex, readonly bigint[]];
+
+    const eip712Data: Eip712Domain = {
+      fields: fields as string,
+      name,
+      version,
+      chainId,
+      verifyingContract,
+      salt,
+      extensions: [...extensions],
+    };
+
+    return {
+      address: networkAddress as Address,
+      subnetwork: subnetwork as Hex,
+      eip712Data,
+    };
+  }
+
+  /** Build extraData array for aggregators to be used in voting power provider calls */
+  private async buildAggregatorsExtraData(
+    config: NetworkConfig,
+    epochStartTs: number,
+    type?: 'simple' | 'zk',
+  ): Promise<Hex[]> {
+    const numAggregators = Number(config.numAggregators);
+    if (!Number.isFinite(numAggregators) || numAggregators <= 0) return [] as Hex[];
+
+    const extraType: 'simple' | 'zk' = type ?? 'simple';
+    if (extraType === 'simple') {
+      const items: Hex[] = [];
+      for (let i = 0; i < numAggregators; i++) {
+        items.push(
+          encodeAbiParameters(
+            [
+              { name: 'aggregatorIndex', type: 'uint16' },
+              { name: 'epochStart', type: 'uint48' },
+            ],
+            [i, epochStartTs],
+          ) as Hex,
+        );
+      }
+      return items;
+    }
+
+    // zk: include subnetwork as part of the encoded context
+    const driver = this.getDriverContract();
+    const subnetwork = (await driver.read.SUBNETWORK({
+      blockTag: toBlockTag(true),
+    })) as Hex;
+
+    const items: Hex[] = [];
+    for (let i = 0; i < numAggregators; i++) {
+      items.push(
+        encodeAbiParameters(
+          [
+            { name: 'aggregatorIndex', type: 'uint16' },
+            { name: 'epochStart', type: 'uint48' },
+            { name: 'subnetwork', type: 'bytes32' },
+          ],
+          [i, epochStartTs, subnetwork],
+        ) as Hex,
+      );
+    }
+    return items;
+  }
+
+  /**
+   * Build key/value style extraData entries like relay Aggregator.GenerateExtraData
+   * - simple: keccak(ValidatorsData) and compressed aggregated G1 key
+   * - zk: totalActiveValidators and MiMC-based validators hash
+   * Note: This is a lightweight TS analog without bn254 ops; it uses available data.
+   */
+  public async getAggregatorsExtraData(
+    mode: AggregatorMode,
+    keyTags?: number[],
+    finalized: boolean = true,
+    epoch?: number,
+  ): Promise<AggregatorExtraDataEntry[]> {
+    const vset = await this.getValidatorSet(epoch, finalized);
+    // If keyTags not provided, use requiredKeyTags from network config
+    const config = await this.getNetworkConfig(vset.epoch, finalized);
+    const tags = keyTags && keyTags.length > 0 ? keyTags : config.requiredKeyTags;
+    if (mode === AGGREGATOR_MODE.SIMPLE) return buildSimpleExtraData(vset, tags);
+    return await buildZkExtraData(vset, tags);
+  }
+
+  // kept for backward compatibility; not used by current code paths
+  private hashKey(types: string[], values: (number | bigint)[]): Hex {
+    const abiParams = types.map((t, i) => ({ name: `f${i}`, type: t }) as const);
+    return keccak256(encodeAbiParameters(abiParams, values as unknown[]));
   }
 
   /**
@@ -78,9 +227,15 @@ export class ValidatorSetDeriver {
   private async validateRequiredChains(): Promise<void> {
     try {
       const driver = this.getDriverContract();
-      const currentEpoch = await driver.read.getCurrentEpoch();
-      const timestamp = await driver.read.getEpochStart([Number(currentEpoch)]);
-      const config: any = await driver.read.getConfigAt([Number(timestamp)]);
+      const currentEpoch = await driver.read.getCurrentEpoch({
+        blockTag: toBlockTag(true),
+      });
+      const timestamp = await driver.read.getEpochStart([Number(currentEpoch)], {
+        blockTag: toBlockTag(true),
+      });
+      const config: any = await driver.read.getConfigAt([Number(timestamp)], {
+        blockTag: toBlockTag(true),
+      });
 
       const requiredChainIds = new Set<number>();
       requiredChainIds.add(this.driverAddress.chainId);
@@ -135,6 +290,9 @@ export class ValidatorSetDeriver {
     });
   }
 
+  // withPreferredBlockTag removed; use explicit { blockTag: toBlockTag(...) }
+
+
   private async getFromCache(key: string): Promise<any | null> {
     if (!this.cache) return null;
     try {
@@ -153,28 +311,37 @@ export class ValidatorSetDeriver {
     }
   }
 
-  async getCurrentEpoch(): Promise<number> {
+  async getCurrentEpoch(finalized: boolean = true): Promise<number> {
     await this.ensureInitialized();
     const driver = this.getDriverContract();
-    const epoch = await driver.read.getCurrentEpoch();
+    const epoch = await driver.read.getCurrentEpoch({
+      blockTag: toBlockTag(finalized),
+    });
     return Number(epoch);
   }
 
-  async getNetworkConfig(epoch?: number): Promise<NetworkConfig> {
+  async getNetworkConfig(epoch?: number, finalized: boolean = true): Promise<NetworkConfig> {
     await this.ensureInitialized();
 
+    const useCache = finalized;
     const cacheKey = `config_${epoch || 'current'}`;
-    const cached = await this.getFromCache(cacheKey);
-    if (cached) return cached;
+    if (useCache) {
+      const cached = await this.getFromCache(cacheKey);
+      if (cached) return cached;
+    }
 
     const driver = this.getDriverContract();
 
     if (epoch === undefined) {
-      epoch = await this.getCurrentEpoch();
+      epoch = await this.getCurrentEpoch(finalized);
     }
 
-    const timestamp = await driver.read.getEpochStart([Number(epoch)]);
-    const config: any = await driver.read.getConfigAt([Number(timestamp)]);
+    const timestamp = await driver.read.getEpochStart([Number(epoch)], {
+      blockTag: toBlockTag(finalized),
+    });
+    const config: any = await driver.read.getConfigAt([Number(timestamp)], {
+      blockTag: toBlockTag(finalized),
+    });
 
     const result: NetworkConfig = {
       votingPowerProviders: config.votingPowerProviders.map((p: any) => ({
@@ -203,32 +370,39 @@ export class ValidatorSetDeriver {
       numAggregators: Number(config.numAggregators),
     };
 
-    await this.setToCache(cacheKey, result);
-    await this.cleanupOldCache(epoch);
+    if (useCache) {
+      await this.setToCache(cacheKey, result);
+      await this.cleanupOldCache(epoch);
+    }
 
     return result;
   }
 
-  async getValidatorSet(epoch?: number): Promise<ValidatorSet> {
+  async getValidatorSet(epoch?: number, finalized: boolean = true): Promise<ValidatorSet> {
     await this.ensureInitialized();
 
+    const useCache2 = finalized;
     const cacheKey = `valset_${epoch || 'current'}`;
-    const cached = await this.getFromCache(cacheKey);
-    if (cached) return cached;
-
-    if (epoch === undefined) {
-      epoch = await this.getCurrentEpoch();
+    if (useCache2) {
+      const cached = await this.getFromCache(cacheKey);
+      if (cached) return cached;
     }
 
-    const config = await this.getNetworkConfig(epoch);
+    if (epoch === undefined) {
+      epoch = await this.getCurrentEpoch(finalized);
+    }
+
+    const config = await this.getNetworkConfig(epoch, finalized);
     const driver = this.getDriverContract();
 
-    const timestamp = await driver.read.getEpochStart([Number(epoch)]);
+    const timestamp = await driver.read.getEpochStart([Number(epoch)], {
+      blockTag: toBlockTag(finalized),
+    });
 
     // Get voting powers from all providers
     const allVotingPowers: { chainId: number; votingPowers: OperatorVotingPower[] }[] = [];
     for (const provider of config.votingPowerProviders) {
-      const votingPowers = await this.getVotingPowers(provider, Number(timestamp));
+      const votingPowers = await this.getVotingPowers(provider, Number(timestamp), finalized);
       allVotingPowers.push({
         chainId: provider.chainId,
         votingPowers,
@@ -236,7 +410,7 @@ export class ValidatorSetDeriver {
     }
 
     // Get keys
-    const keys = await this.getKeys(config.keysProvider, Number(timestamp));
+    const keys = await this.getKeys(config.keysProvider, Number(timestamp), finalized);
 
     // Form validators
     const validators = this.formValidators(config, allVotingPowers, keys);
@@ -253,6 +427,7 @@ export class ValidatorSetDeriver {
     const { settlementStatus, integrityStatus } = await this.getSettlementStatus(
       config.settlements,
       epoch,
+      finalized,
     );
 
     const valset: ValidatorSet = {
@@ -279,8 +454,10 @@ export class ValidatorSetDeriver {
       );
     }
 
-    await this.setToCache(cacheKey, result);
-    await this.cleanupOldCache(epoch);
+    if (useCache2) {
+      await this.setToCache(cacheKey, result);
+      await this.cleanupOldCache(epoch);
+    }
 
     return result;
   }
@@ -289,19 +466,83 @@ export class ValidatorSetDeriver {
    * Get the current validator set (simplified interface)
    */
   async getCurrentValidatorSet(): Promise<ValidatorSet> {
-    return this.getValidatorSet();
+    return this.getValidatorSet(undefined, true);
   }
 
   /**
    * Get the current network configuration (simplified interface)
    */
   async getCurrentNetworkConfig(): Promise<NetworkConfig> {
-    return this.getNetworkConfig();
+    return this.getNetworkConfig(undefined, true);
+  }
+
+  // ================================
+  // ValidatorSetHeader helpers
+  // ================================
+
+  /** Sum voting power of active validators only */
+  public getTotalActiveVotingPower(v: ValidatorSet): bigint {
+    let total: bigint = 0n;
+    for (const validator of v.validators) {
+      if (validator.isActive) total += validator.votingPower;
+    }
+    return total;
+  }
+
+  /** Construct ValidatorSetHeader from a ValidatorSet */
+  public getValidatorSetHeader(v: ValidatorSet): ValidatorSetHeader {
+    const sszMroot = sszTreeRoot(v);
+    return {
+      version: v.version,
+      requiredKeyTag: v.requiredKeyTag,
+      epoch: v.epoch,
+      captureTimestamp: v.captureTimestamp,
+      quorumThreshold: v.quorumThreshold,
+      totalVotingPower: this.getTotalActiveVotingPower(v),
+      validatorsSszMRoot: sszMroot,
+    };
+  }
+
+  /** ABI-encode a ValidatorSetHeader per Solidity signature */
+  public abiEncodeValidatorSetHeader(h: ValidatorSetHeader): Hex {
+    return encodeAbiParameters(
+      [
+        { name: 'version', type: 'uint8' },
+        { name: 'requiredKeyTag', type: 'uint8' },
+        { name: 'epoch', type: 'uint48' },
+        { name: 'captureTimestamp', type: 'uint48' },
+        { name: 'quorumThreshold', type: 'uint256' },
+        { name: 'totalVotingPower', type: 'uint256' },
+        { name: 'validatorsSszMRoot', type: 'bytes32' },
+      ],
+      [
+        h.version,
+        h.requiredKeyTag,
+        h.epoch,
+        h.captureTimestamp,
+        h.quorumThreshold,
+        h.totalVotingPower,
+        h.validatorsSszMRoot,
+      ],
+    ) as Hex;
+  }
+
+  /** Keccak256 hash of the ABI-encoded header */
+  public hashValidatorSetHeader(h: ValidatorSetHeader): Hex {
+    const encoded = this.abiEncodeValidatorSetHeader(h);
+    return keccak256(encoded);
+  }
+
+  /** Convenience: Build header from set and return its hash */
+  public getValidatorSetHeaderHash(v: ValidatorSet): Hex {
+    const header = this.getValidatorSetHeader(v);
+    return this.hashValidatorSetHeader(header);
   }
 
   private async getVotingPowers(
     provider: CrossChainAddress,
     timestamp: number,
+    preferFinalized: boolean,
   ): Promise<OperatorVotingPower[]> {
     const client = this.getClient(provider.chainId);
     const providerContract = getContract({
@@ -310,7 +551,10 @@ export class ValidatorSetDeriver {
       client,
     });
 
-    const votingPowers = await providerContract.read.getVotingPowersAt([[], Number(timestamp)]);
+    const votingPowers = await providerContract.read.getVotingPowersAt(
+      [[], Number(timestamp)],
+      { blockTag: toBlockTag(preferFinalized) },
+    );
 
     return votingPowers.map((vp: any) => ({
       operator: vp.operator as Address,
@@ -324,6 +568,7 @@ export class ValidatorSetDeriver {
   private async getKeys(
     provider: CrossChainAddress,
     timestamp: number,
+    preferFinalized: boolean,
   ): Promise<OperatorWithKeys[]> {
     const client = this.getClient(provider.chainId);
     const keyRegistry = getContract({
@@ -332,7 +577,9 @@ export class ValidatorSetDeriver {
       client,
     });
 
-    const keys = await keyRegistry.read.getKeysAt([Number(timestamp)]);
+    const keys = await keyRegistry.read.getKeysAt([Number(timestamp)], {
+      blockTag: toBlockTag(preferFinalized),
+    });
 
     return keys.map((k: any) => ({
       operator: k.operator as Address,
@@ -382,13 +629,18 @@ export class ValidatorSetDeriver {
     for (const validator of validatorsMap.values()) {
       if (validator.vaults.length > SSZ_MAX_VAULTS) {
         // Sort by voting power descending, then by address
-        validator.vaults.sort((a, b) => {
-          const powerDiff = b.votingPower - a.votingPower;
-          if (powerDiff !== 0n) {
-            return powerDiff > 0n ? 1 : -1;
-          }
-          return a.vault.toLowerCase().localeCompare(b.vault.toLowerCase());
-        });
+        validator.vaults.sort(
+          (
+            a: { votingPower: bigint; vault: Address },
+            b: { votingPower: bigint; vault: Address },
+          ) => {
+            const powerDiff: bigint = b.votingPower - a.votingPower;
+            if (powerDiff !== 0n) {
+              return powerDiff > 0n ? 1 : -1;
+            }
+            return a.vault.toLowerCase().localeCompare(b.vault.toLowerCase());
+          },
+        );
         validator.vaults = validator.vaults.slice(0, SSZ_MAX_VAULTS);
 
         // Recalculate total voting power
@@ -396,7 +648,9 @@ export class ValidatorSetDeriver {
       }
 
       // Sort vaults by address for final output
-      validator.vaults.sort((a, b) => a.vault.toLowerCase().localeCompare(b.vault.toLowerCase()));
+      validator.vaults.sort((a: { vault: Address }, b: { vault: Address }) =>
+        a.vault.toLowerCase().localeCompare(b.vault.toLowerCase()),
+      );
     }
 
     // Process keys
@@ -413,8 +667,8 @@ export class ValidatorSetDeriver {
     let validators = Array.from(validatorsMap.values());
 
     // Sort by voting power descending, then by operator address
-    validators.sort((a, b) => {
-      const powerDiff = b.votingPower - a.votingPower;
+    validators.sort((a: Validator, b: Validator) => {
+      const powerDiff: bigint = b.votingPower - a.votingPower;
       if (powerDiff !== 0n) {
         return powerDiff > 0n ? 1 : -1;
       }
@@ -441,7 +695,7 @@ export class ValidatorSetDeriver {
     for (const validator of validators) {
       // Check minimum voting power
       if (validator.votingPower < config.minInclusionVotingPower) {
-        continue;
+        break;
       }
 
       // Check if validator has keys
@@ -478,15 +732,14 @@ export class ValidatorSetDeriver {
   private async getSettlementStatus(
     settlements: CrossChainAddress[],
     epoch: number,
+    preferFinalized: boolean,
   ): Promise<{
     settlementStatus: 'committed' | 'pending' | 'missing';
     integrityStatus: 'valid' | 'invalid';
   }> {
     const hashes: Map<string, string> = new Map();
-    const currentEpoch = await this.getCurrentEpoch();
-    let hasMissing = false;
-    let hasPending = false;
     let allCommitted = true;
+    let lastCommitted: number = Number.MAX_SAFE_INTEGER;
 
     for (const settlement of settlements) {
       const client = this.getClient(settlement.chainId);
@@ -497,33 +750,32 @@ export class ValidatorSetDeriver {
       });
 
       try {
-        const isCommitted = await settlementContract.read.isValSetHeaderCommittedAt([
-          Number(epoch),
-        ]);
+        const isCommitted = await settlementContract.read.isValSetHeaderCommittedAt(
+          [Number(epoch)],
+          { blockTag: toBlockTag(preferFinalized) },
+        );
 
-        if (isCommitted) {
-          const headerHash = (await settlementContract.read.getValSetHeaderHashAt([
-            Number(epoch),
-          ])) as Hex;
-          if (headerHash) {
-            hashes.set(`${settlement.chainId}_${settlement.address}`, headerHash);
-          }
-        } else {
+        if (!isCommitted) {
           allCommitted = false;
-          const lastCommitted = await settlementContract.read.getLastCommittedHeaderEpoch();
-
-          if (lastCommitted > BigInt(epoch)) {
-            hasMissing = true;
-          } else if (epoch === currentEpoch) {
-            hasPending = true;
-          } else {
-            hasMissing = true;
-          }
+          break;
         }
+
+        const headerHash = (await settlementContract.read.getValSetHeaderHashAt(
+          [Number(epoch)],
+          { blockTag: toBlockTag(preferFinalized) },
+        )) as Hex;
+        if (headerHash) {
+          hashes.set(`${settlement.chainId}_${settlement.address}`, headerHash);
+        }
+
+        const lastCommittedEpoch = await settlementContract.read.getLastCommittedHeaderEpoch({
+          blockTag: toBlockTag(preferFinalized),
+        });
+
+        lastCommitted = Math.min(lastCommitted, Number(lastCommittedEpoch));
       } catch (error) {
         console.error(`Failed to get status for settlement ${settlement.address}:`, error);
         allCommitted = false;
-        hasMissing = true;
       }
     }
 
@@ -531,12 +783,10 @@ export class ValidatorSetDeriver {
     let settlementStatus: 'committed' | 'pending' | 'missing';
     if (allCommitted) {
       settlementStatus = 'committed';
-    } else if (hasMissing) {
+    } else if (epoch < lastCommitted) {
       settlementStatus = 'missing';
-    } else if (hasPending) {
+    } else  {
       settlementStatus = 'pending';
-    } else {
-      settlementStatus = 'missing'; // fallback
     }
 
     // Check integrity - all committed hashes should match

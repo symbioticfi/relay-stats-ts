@@ -1,14 +1,13 @@
-/* eslint-disable @typescript-eslint/no-require-imports */
-const globals = require("globals");
-const tseslint = require("typescript-eslint");
+import globals from 'globals';
+import tseslint from 'typescript-eslint';
 
-module.exports = [
-  { 
-    files: ["src/**/*.{js,mjs,cjs,ts,mts,cts}", "examples/**/*.{js,mjs,cjs,ts,mts,cts}"], 
-    languageOptions: { globals: globals.browser }
+export default [
+  {
+    files: ['src/**/*.{js,mjs,cjs,ts,mts,cts}', 'examples/**/*.{js,mjs,cjs,ts,mts,cts}'],
+    languageOptions: { globals: globals.node }
   },
   {
-    ignores: ["dist/**", "node_modules/**", "**/*.d.ts", "**/*.js"]
+    ignores: ['dist/**', 'node_modules/**', '**/*.d.ts']
   },
   ...tseslint.configs.recommended,
 ];
