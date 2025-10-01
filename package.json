@@ -1,0 +1,75 @@
+{
+    "name": "@symbioticfi/relay-stats-ts",
+    "version": "1.0.0",
+    "description": "TypeScript library for deriving validator sets from Symbiotic network contracts",
+    "type": "module",
+    "main": "dist/index.js",
+    "types": "dist/index.d.ts",
+    "files": [
+        "dist",
+        "src"
+    ],
+    "scripts": {
+        "build": "tsc",
+        "clean": "rm -rf dist",
+        "lint": "eslint .",
+        "lint:fix": "eslint . --fix",
+        "format": "prettier --write \"src/**/*.ts\"",
+        "format:check": "prettier --check \"src/**/*.ts\"",
+        "test": "echo \"No tests specified\" && exit 0",
+        "prepublishOnly": "npm run clean && npm run build && npm run lint && npm run format:check",
+        "prepare": "husky install",
+        "precommit": "lint-staged",
+        "ci": "npm run build && npm run lint && npm run format:check"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/symbioticfi/valset-derivation.git"
+    },
+    "keywords": [
+        "symbiotic",
+        "ethereum",
+        "validator",
+        "blockchain",
+        "typescript",
+        "validator-set",
+        "consensus",
+        "relay"
+    ],
+    "engines": {
+        "node": ">=18.0.0"
+    },
+    "author": "Symbiotic",
+    "license": "MIT",
+    "bugs": {
+        "url": "https://github.com/symbioticfi/valset-derivation/issues"
+    },
+    "homepage": "https://github.com/symbioticfi/valset-derivation#readme",
+    "dependencies": {
+        "@chainsafe/ssz": "^1.2.2",
+        "big-integer": "^1.6.52",
+        "circomlibjs": "^0.0.8",
+        "viem": "^2.36.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "@typescript-eslint/eslint-plugin": "^6.0.0",
+        "@typescript-eslint/parser": "^6.0.0",
+        "eslint": "^8.57.1",
+        "eslint-config-prettier": "^9.0.0",
+        "globals": "^16.4.0",
+        "husky": "^8.0.3",
+        "jiti": "^2.5.1",
+        "lint-staged": "^15.0.0",
+        "prettier": "^3.0.0",
+        "ts-node": "^10.9.1",
+        "typescript": "^5.0.0",
+        "typescript-eslint": "^8.44.0"
+    },
+    "lint-staged": {
+        "*.ts": [
+            "eslint --fix",
+            "prettier --write"
+        ]
+    }
+}
