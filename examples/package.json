@@ -1,0 +1,20 @@
+{
+    "name": "relay-stats-ts-example",
+    "version": "1.0.0",
+    "description": "Example usage of the @symbioticfi/relay-stats-ts library",
+    "main": "example.js",
+    "scripts": {
+        "start": "ts-node example.ts",
+        "build": "tsc",
+        "example": "node dist/example.js"
+    },
+    "dependencies": {
+        "@symbioticfi/relay-stats-ts": "file:..",
+        "viem": "^2.36.0"
+    },
+    "devDependencies": {
+        "@types/node": "^20.0.0",
+        "ts-node": "^10.9.1",
+        "typescript": "^5.0.0"
+    }
+}
