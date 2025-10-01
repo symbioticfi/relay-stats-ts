@@ -30,8 +30,8 @@ const deriver = await ValidatorSetDeriver.create({
 // Get current validator set
 const validatorSet = await deriver.getCurrentValidatorSet();
 console.log(`Active validators: ${validatorSet.validators.filter(v => v.isActive).length}`);
-console.log(`Settlement status: ${validatorSet.settlementStatus}`);
-console.log(`Integrity status: ${validatorSet.integrityStatus}`);
+console.log(`Settlement status: ${validatorSet.status}`);
+console.log(`Integrity status: ${validatorSet.integrity}`);
 ```
 
 ## Usage

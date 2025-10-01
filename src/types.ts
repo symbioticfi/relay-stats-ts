@@ -52,8 +52,8 @@ export interface ValidatorSet {
   quorumThreshold: bigint;
   validators: Validator[];
   totalVotingPower: bigint;
-  settlementStatus: 'committed' | 'pending' | 'missing';
-  integrityStatus: 'valid' | 'invalid';
+  status: 'committed' | 'pending' | 'missing';
+  integrity: 'valid' | 'invalid';
 }
 
 export interface ValidatorSetHeader {

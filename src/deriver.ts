@@ -196,12 +196,6 @@ export class ValidatorSetDeriver {
     return await buildZkExtraData(vset, tags);
   }
 
-  // kept for backward compatibility; not used by current code paths
-  private hashKey(types: string[], values: (number | bigint)[]): Hex {
-    const abiParams = types.map((t, i) => ({ name: `f${i}`, type: t }) as const);
-    return keccak256(encodeAbiParameters(abiParams, values as unknown[]));
-  }
-
   /**
    * Static factory method that ensures the deriver is fully initialized before returning
    */
@@ -434,7 +428,7 @@ export class ValidatorSetDeriver {
     const quorumThreshold = this.calcQuorumThreshold(config, totalVotingPower);
 
     // Get settlement status
-    const { settlementStatus, integrityStatus } = await this.getSettlementStatus(
+    const { status, integrity } = await this.getValsetStatus(
       config.settlements,
       epoch,
       finalized,
@@ -448,8 +442,8 @@ export class ValidatorSetDeriver {
       quorumThreshold,
       validators,
       totalVotingPower,
-      settlementStatus,
-      integrityStatus,
+      status: status,
+      integrity: integrity,
     };
 
     const result: ValidatorSet = {
@@ -457,7 +451,7 @@ export class ValidatorSetDeriver {
     };
 
     // Raise error if integrity status is invalid
-    if (result.integrityStatus === 'invalid') {
+    if (result.integrity === 'invalid') {
       throw new Error(
         `Settlement integrity check failed for epoch ${epoch}. ` +
           `Header hashes do not match across settlements, indicating a critical issue with the validator set.`,
@@ -738,13 +732,13 @@ export class ValidatorSetDeriver {
     return (totalVotingPower * threshold.quorumThreshold) / 1000000000000000000n + 1n;
   }
 
-  private async getSettlementStatus(
+  private async getValsetStatus(
     settlements: CrossChainAddress[],
     epoch: number,
     preferFinalized: boolean,
   ): Promise<{
-    settlementStatus: 'committed' | 'pending' | 'missing';
-    integrityStatus: 'valid' | 'invalid';
+    status: 'committed' | 'pending' | 'missing';
+    integrity: 'valid' | 'invalid';
   }> {
     const hashes: Map<string, string> = new Map();
     let allCommitted = true;
@@ -779,7 +773,7 @@ export class ValidatorSetDeriver {
         const lastCommittedEpoch = await settlementContract.read.getLastCommittedHeaderEpoch({
           blockTag: toBlockTag(preferFinalized),
         });
-
+        
         lastCommitted = Math.min(lastCommitted, Number(lastCommittedEpoch));
       } catch (error) {
         console.error(`Failed to get status for settlement ${settlement.address}:`, error);
@@ -788,20 +782,20 @@ export class ValidatorSetDeriver {
     }
 
     // Determine global settlement status
-    let settlementStatus: 'committed' | 'pending' | 'missing';
+    let status: 'committed' | 'pending' | 'missing';
     if (allCommitted) {
-      settlementStatus = 'committed';
-    } else if (epoch < lastCommitted) {
-      settlementStatus = 'missing';
+      status = 'committed';
+    } else if (epoch < lastCommitted && lastCommitted != Number.MAX_SAFE_INTEGER) {
+      status = 'missing';
     } else {
-      settlementStatus = 'pending';
+      status = 'pending';
     }
 
     // Check integrity - all committed hashes should match
     const uniqueHashes = new Set(hashes.values());
-    const integrityStatus = uniqueHashes.size <= 1 ? 'valid' : 'invalid';
+    const integrity = uniqueHashes.size <= 1 ? 'valid' : 'invalid';
 
-    return { settlementStatus, integrityStatus };
+    return { status: status, integrity: integrity };
   }
 
   private async cleanupOldCache(currentEpoch: number): Promise<void> {
