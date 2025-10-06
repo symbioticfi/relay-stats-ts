@@ -6,9 +6,6 @@ import { hexToBytes } from './ssz.js';
 import { EXTRA_NAME, EXTRA_PREFIX } from './constants.js';
 import { FIELD_MODULUS, mimcBn254Hash } from './mimc_bn254.js';
 
-// Names mirror relay constants for deterministic key derivation
-
-// Key derivation helpers (TS analogs of helpers.GetExtraDataKey* in relay)
 function keccakName(name: string): Hex {
   const hex = ('0x' + Buffer.from(name, 'utf8').toString('hex')) as Hex;
   return keccak256(hex);
@@ -72,7 +69,6 @@ function modField(value: bigint): bigint {
 function filterBlsBn254Tags(keyTags: KeyTag[]): KeyTag[] {
   const needToAggregateTags: KeyTag[] = [];
   for (const tag of keyTags) {
-    // only bn254 bls for now
     if (getKeyType(tag) === KeyType.KeyTypeBlsBn254) {
       needToAggregateTags.push(tag);
     }
@@ -80,7 +76,6 @@ function filterBlsBn254Tags(keyTags: KeyTag[]): KeyTag[] {
   return needToAggregateTags;
 }
 
-// Simple mode: collect validators with compressed G1 keys, sorted by keySerialized
 function collectValidatorsForSimple(
   vset: ValidatorSet,
   tag: number,
@@ -118,7 +113,6 @@ function collectValidatorsForSimple(
   return { validatorTuples: tuples, aggregatedKeyCompressed };
 }
 
-// ZK mode: collect validators for MiMC hashing (different from simple)
 type ZkValidatorTuple = {
   keySerialized: Hex;
   votingPower: bigint;
@@ -223,23 +217,17 @@ export function buildSimpleExtraData(
   keyTags: number[],
 ): AggregatorExtraDataEntry[] {
   const entries: AggregatorExtraDataEntry[] = [];
-  // Filter to only BLS BN254 keys for aggregation
   const filteredTags = filterBlsBn254Tags(keyTags);
 
   for (const tag of filteredTags) {
     const { validatorTuples, aggregatedKeyCompressed } = collectValidatorsForSimple(vset, tag);
     if (validatorTuples.length === 0) continue;
-    // Generate keccak hash of validators data (like Go: keccak(ValidatorsData))
     const validatorsKeccak = keccakValidatorsData(validatorTuples);
     const setHashKey = computeExtraDataKeyTagged(1, tag, EXTRA_NAME.SIMPLE_VALIDATORS_KECCAK);
     entries.push({ key: setHashKey, value: validatorsKeccak });
-
-    // Add compressed aggregated G1 key (like Go: compressed aggregated G1 key)
     const aggKeyKey = computeExtraDataKeyTagged(1, tag, EXTRA_NAME.SIMPLE_AGG_G1);
     entries.push({ key: aggKeyKey, value: aggregatedKeyCompressed });
   }
-
-  // Sort extra data by key to ensure deterministic order (like Go)
   return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
@@ -248,29 +236,17 @@ export async function buildZkExtraData(
   keyTags: number[],
 ): Promise<AggregatorExtraDataEntry[]> {
   const entries: AggregatorExtraDataEntry[] = [];
-
-  // Add total active validators (like Go: totalActiveValidators)
   const totalActive = vset.validators.filter((v) => v.isActive).length;
   const totalActiveKey = computeExtraDataKey(0, EXTRA_NAME.ZK_TOTAL_ACTIVE);
   const totalActiveBytes32 = ('0x' + totalActive.toString(16).padStart(64, '0')) as Hex;
   entries.push({ key: totalActiveKey, value: totalActiveBytes32 });
-
-  // Filter to only BLS BN254 keys for aggregation
   const filteredTags = filterBlsBn254Tags(keyTags);
-
-  // Generate MiMC-based validator set hash for each key tag (like Go: aggregatedPubKeys loop)
   for (const tag of filteredTags) {
     const tuples = collectValidatorsForZk(vset, tag);
     if (tuples.length === 0) continue;
-
-    // Generate MiMC accumulator (like Go: validatorSetMimcAccumulator)
     const mimcAccumulator = await mimcHashValidators(tuples);
-
-    // Add validator set hash key (like Go: validatorSetHashKey)
     const validatorSetHashKey = computeExtraDataKeyTagged(0, tag, EXTRA_NAME.ZK_VALIDATORS_MIMC);
     entries.push({ key: validatorSetHashKey, value: mimcAccumulator });
   }
-
-  // Sort extra data by key to ensure deterministic order (like Go)
   return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
