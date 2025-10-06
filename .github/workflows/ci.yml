@@ -35,11 +35,3 @@ jobs:
       - name: Build
         run: npm run build
         
-      - name: Upload coverage (if present)
-        if: ${{ hashFiles('coverage/lcov.info') != '' }}
-        uses: codecov/codecov-action@v4
-        with:
-          files: ./coverage/lcov.info
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: false

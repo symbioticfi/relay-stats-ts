@@ -21,10 +21,6 @@
         "rebuild": "npm run build && cd examples && npm install --force && npm run build",
         "rebuild:all": "./rebuild.sh"
     },
-    "repository": {
-        "type": "git",
-        "url": "git+https://github.com/symbioticfi/valset-derivation.git"
-    },
     "keywords": [
         "symbiotic",
         "ethereum",
@@ -40,10 +36,14 @@
     },
     "author": "Symbiotic",
     "license": "MIT",
-    "bugs": {
-        "url": "https://github.com/symbioticfi/valset-derivation/issues"
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/symbioticfi/relay-stats-ts.git"
     },
-    "homepage": "https://github.com/symbioticfi/valset-derivation#readme",
+    "bugs": {
+        "url": "https://github.com/symbioticfi/relay-stats-ts/issues"
+    },
+    "homepage": "https://github.com/symbioticfi/relay-stats-ts#readme",
     "dependencies": {
         "@chainsafe/ssz": "^1.2.2",
         "big-integer": "^1.6.52",

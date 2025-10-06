@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/node/v/@symbioticfi/relay-stats-ts)](https://nodejs.org/)
 
-TypeScript library for deriving validator sets from Symbiotic network contracts.
+TypeScript utilities for deriving Symbiotic validator-set data from on-chain contracts. The library mirrors the Go reference implementation and exposes helpers for SSZ encoding, MiMC hashing, and aggregator extra data generation.
 
 ## Installation
 
@@ -14,130 +14,92 @@ npm install @symbioticfi/relay-stats-ts
 yarn add @symbioticfi/relay-stats-ts
 ```
 
+Requires Node.js 18 or newer.
+
 ## Quick Start
 
-```typescript
+Create a deriver that talks to the ValSet driver and fetch the current validator set:
+
+```ts
 import { ValidatorSetDeriver } from '@symbioticfi/relay-stats-ts';
 
 const deriver = await ValidatorSetDeriver.create({
-  rpcUrls: ['http://localhost:8545'],
+  rpcUrls: ['https://ethereum.publicnode.com'],
   driverAddress: {
-    chainId: 31337,
-    address: '0x...',
+    chainId: 1,
+    address: '0xDriverAddress',
   },
 });
 
-// Get current validator set
 const validatorSet = await deriver.getCurrentValidatorSet();
+console.log(`Epoch: ${validatorSet.epoch}`);
 console.log(`Active validators: ${validatorSet.validators.filter(v => v.isActive).length}`);
 console.log(`Settlement status: ${validatorSet.status}`);
-console.log(`Integrity status: ${validatorSet.integrity}`);
+console.log(`Integrity: ${validatorSet.integrity}`);
 ```
 
-## Usage
+### Aggregator extra data
 
-```typescript
-import { ValidatorSetDeriver, MemoryCache } from '@symbioticfi/relay-stats-ts';
+The library can also produce the extra-data payloads used by Relay aggregators:
 
-// Initialize without cache
-const deriver = new ValidatorSetDeriver({
-  rpcUrls: [
-    'https://eth-mainnet.alchemyapi.io/v2/YOUR_KEY',
-    'https://polygon-rpc.com'
-  ],
-  driverAddress: { 
-    chainId: 1, 
-    address: '0x...' 
+```ts
+const extraData = await deriver.getAggregatorsExtraData('zk');
+extraData.forEach(({ key, value }) => console.log(key, value));
+```
+
+Pass `'simple'` for the simple mode or provide custom `keyTags` when you need non-default key selection.
+
+## Caching
+
+`ValidatorSetDeriver` accepts any cache that conforms to the `CacheInterface` and will only persist finalized data. Implement the interface to integrate Redis, in-memory caches, or other stores:
+
+```ts
+import type { CacheInterface } from '@symbioticfi/relay-stats-ts';
+
+class MapCache implements CacheInterface {
+  private map = new Map<string, unknown>();
+  async get(key: string) {
+    return this.map.get(key) ?? null;
   }
-});
-
-// Initialize with cache
-const deriverWithCache = new ValidatorSetDeriver({
-  rpcUrls: ["..."],
-  driverAddress: { chainId: 1, address: '0x...' },
-  cache: new MemoryCache(),
-  maxSavedEpochs: 100
-});
-
-// Get current network config
-const config = await deriver.getNetworkConfig();
-
-// Get validator set for specific epoch
-const validatorSet = await deriver.getValidatorSet(42);
-
-// Get network data for settlement
-const networkData = await deriver.getNetworkData({
-  chainId: 1,
-  address: '0xSettlementAddress'
-});
-```
-
-## Features
-
-- **Validator Set Derivation**: Derive validator sets from on-chain data
-- **Multi-chain Support**: Handle cross-chain addresses and providers
-- **Settlement Status Tracking**: Monitor commitment status across settlements
-- **Flexible Caching**: Optional caching with pluggable cache interface
-
-## API
-
-### ValidatorSetDeriver
-
-Main class for deriving validator sets.
-
-#### Constructor Options
-
-```typescript
-interface ValidatorSetDeriverConfig {
-  rpcUrls: string[];              // RPC endpoints for required chains
-  driverAddress: CrossChainAddress; // Driver contract address
-  cache?: CacheInterface | null;   // Optional cache implementation
-  maxSavedEpochs?: number;         // Max epochs to cache (default: 100)
+  async set(key: string, value: unknown) {
+    this.map.set(key, value);
+  }
+  async delete(key: string) {
+    this.map.delete(key);
+  }
+  async clear() {
+    this.map.clear();
+  }
 }
+
+const deriver = await ValidatorSetDeriver.create({
+  rpcUrls: [...],
+  driverAddress: {...},
+  cache: new MapCache(),
+});
 ```
 
-#### Methods
+## API Highlights
 
-- `getCurrentEpoch(): Promise<number>` - Get current epoch number
-- `getNetworkConfig(epoch?: number): Promise<NetworkConfig>` - Get network configuration
-- `getValidatorSet(epoch?: number): Promise<ValidatorSet>` - Get validator set with settlement statuses
+- `ValidatorSetDeriver.create(config)` – initialize clients and validate required chains.
+- `getValidatorSet(epoch?, finalized = true)` – fetches validator sets with settlement status.
+- `getNetworkConfig(epoch?, finalized = true)` – retrieves driver configuration for an epoch.
+- `getNetworkData(settlement?, finalized = true)` – loads the EIP-712 domain from a settlement contract.
+- `buildSimpleExtraData` / `buildZkExtraData` – standalone helpers for constructing aggregator payloads.
+- SSZ helpers (`serializeValidatorSet`, `getValidatorSetRoot`, etc.) exported via `index.ts`.
 
-#### Simplified Interfaces (Current Epoch Only)
-
-- `getCurrentNetworkConfig(): Promise<NetworkConfig>` - Get current epoch network configuration
-- `getCurrentValidatorSet(): Promise<ValidatorSet>` - Get current epoch validator set
-
-### Cache Interface
-
-Implement this interface for custom cache solutions:
-
-```typescript
-interface CacheInterface {
-  get(key: string): Promise<any | null>;
-  set(key: string, value: any): Promise<void>;
-  delete(key: string): Promise<void>;
-  clear(): Promise<void>;
-}
-```
+Refer to `src/types.ts` for full type definitions.
 
 ## Development
 
 ```bash
-# Install dependencies
 npm install
-
-# Run tests
-npm test
-
-# Build
-npm run build
-
-# Lint
 npm run lint
-
-# Format
-npm run format
+npm run format:check
+npm run build
 ```
+
+Use `npm run ci` locally to execute the same build + lint + formatting checks that run in CI.
 
 ## License
 

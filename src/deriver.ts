@@ -279,8 +279,17 @@ export class ValidatorSetDeriver {
   async getNetworkConfig(epoch?: number, finalized: boolean = true): Promise<NetworkConfig> {
     await this.ensureInitialized();
 
+    const currentEpoch = await this.getCurrentEpoch(finalized);
+    const targetEpoch = epoch ?? currentEpoch;
+
+    if (targetEpoch > currentEpoch) {
+      throw new Error(
+        `Requested epoch ${targetEpoch} is not yet available on-chain (latest is ${currentEpoch}).`,
+      );
+    }
+
     const useCache = finalized;
-    const cacheKey = `config_${epoch || 'current'}`;
+    const cacheKey = `config_${targetEpoch}`;
     if (useCache) {
       const cached = await this.getFromCache(cacheKey);
       if (cached) return cached;
@@ -288,11 +297,7 @@ export class ValidatorSetDeriver {
 
     const driver = this.getDriverContract();
 
-    if (epoch === undefined) {
-      epoch = await this.getCurrentEpoch(finalized);
-    }
-
-    const timestamp = await driver.read.getEpochStart([Number(epoch)], {
+    const timestamp = await driver.read.getEpochStart([Number(targetEpoch)], {
       blockTag: toBlockTag(finalized),
     });
     const config: any = await driver.read.getConfigAt([Number(timestamp)], {
@@ -328,7 +333,7 @@ export class ValidatorSetDeriver {
 
     if (useCache) {
       await this.setToCache(cacheKey, result);
-      await this.cleanupOldCache(epoch);
+      await this.cleanupOldCache(targetEpoch);
     }
 
     return result;
@@ -337,21 +342,26 @@ export class ValidatorSetDeriver {
   async getValidatorSet(epoch?: number, finalized: boolean = true): Promise<ValidatorSet> {
     await this.ensureInitialized();
 
+    const currentEpoch = await this.getCurrentEpoch(finalized);
+    const targetEpoch = epoch ?? currentEpoch;
+
+    if (targetEpoch > currentEpoch) {
+      throw new Error(
+        `Requested epoch ${targetEpoch} is not yet available on-chain (latest is ${currentEpoch}).`,
+      );
+    }
+
     const useCache2 = finalized;
-    const cacheKey = `valset_${epoch || 'current'}`;
+    const cacheKey = `valset_${targetEpoch}`;
     if (useCache2) {
       const cached = await this.getFromCache(cacheKey);
       if (cached) return cached;
     }
 
-    if (epoch === undefined) {
-      epoch = await this.getCurrentEpoch(finalized);
-    }
-
-    const config = await this.getNetworkConfig(epoch, finalized);
+    const config = await this.getNetworkConfig(targetEpoch, finalized);
     const driver = this.getDriverContract();
 
-    const timestamp = await driver.read.getEpochStart([Number(epoch)], {
+    const timestamp = await driver.read.getEpochStart([Number(targetEpoch)], {
       blockTag: toBlockTag(finalized),
     });
 
@@ -380,12 +390,16 @@ export class ValidatorSetDeriver {
     const quorumThreshold = this.calcQuorumThreshold(config, totalVotingPower);
 
     // Get settlement status
-    const { status, integrity } = await this.getValsetStatus(config.settlements, epoch, finalized);
+    const { status, integrity } = await this.getValsetStatus(
+      config.settlements,
+      targetEpoch,
+      finalized,
+    );
 
     const valset: ValidatorSet = {
       version: VALSET_VERSION,
       requiredKeyTag: config.requiredHeaderKeyTag,
-      epoch,
+      epoch: targetEpoch,
       captureTimestamp: Number(timestamp),
       quorumThreshold,
       validators,
@@ -401,14 +415,14 @@ export class ValidatorSetDeriver {
     // Raise error if integrity status is invalid
     if (result.integrity === 'invalid') {
       throw new Error(
-        `Settlement integrity check failed for epoch ${epoch}. ` +
+        `Settlement integrity check failed for epoch ${targetEpoch}. ` +
           `Header hashes do not match across settlements, indicating a critical issue with the validator set.`,
       );
     }
 
     if (useCache2) {
       await this.setToCache(cacheKey, result);
-      await this.cleanupOldCache(epoch);
+      await this.cleanupOldCache(targetEpoch);
     }
 
     return result;
