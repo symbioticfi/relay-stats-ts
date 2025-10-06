@@ -1,5 +1,25 @@
 import { Address, Hex } from 'viem';
 
+// Key type definitions
+export enum KeyType {
+  KeyTypeBlsBn254 = 0,
+  KeyTypeEcdsaSecp256k1 = 1,
+  KeyTypeInvalid = 255, // Invalid key type
+}
+
+export type KeyTag = number;
+
+export function getKeyType(tag: KeyTag): KeyType {
+  switch (tag >> 4) {
+    case 0:
+      return KeyType.KeyTypeBlsBn254;
+    case 1:
+      return KeyType.KeyTypeEcdsaSecp256k1;
+    default:
+      return KeyType.KeyTypeInvalid;
+  }
+}
+
 export interface CrossChainAddress {
   chainId: number;
   address: Address;

@@ -128,54 +128,6 @@ export class ValidatorSetDeriver {
     };
   }
 
-  /** Build extraData array for aggregators to be used in voting power provider calls */
-  private async buildAggregatorsExtraData(
-    config: NetworkConfig,
-    epochStartTs: number,
-    type?: 'simple' | 'zk',
-  ): Promise<Hex[]> {
-    const numAggregators = Number(config.numAggregators);
-    if (!Number.isFinite(numAggregators) || numAggregators <= 0) return [] as Hex[];
-
-    const extraType: 'simple' | 'zk' = type ?? 'simple';
-    if (extraType === 'simple') {
-      const items: Hex[] = [];
-      for (let i = 0; i < numAggregators; i++) {
-        items.push(
-          encodeAbiParameters(
-            [
-              { name: 'aggregatorIndex', type: 'uint16' },
-              { name: 'epochStart', type: 'uint48' },
-            ],
-            [i, epochStartTs],
-          ) as Hex,
-        );
-      }
-      return items;
-    }
-
-    // zk: include subnetwork as part of the encoded context
-    const driver = this.getDriverContract();
-    const subnetwork = (await driver.read.SUBNETWORK({
-      blockTag: toBlockTag(true),
-    })) as Hex;
-
-    const items: Hex[] = [];
-    for (let i = 0; i < numAggregators; i++) {
-      items.push(
-        encodeAbiParameters(
-          [
-            { name: 'aggregatorIndex', type: 'uint16' },
-            { name: 'epochStart', type: 'uint48' },
-            { name: 'subnetwork', type: 'bytes32' },
-          ],
-          [i, epochStartTs, subnetwork],
-        ) as Hex,
-      );
-    }
-    return items;
-  }
-
   /**
    * Build key/value style extraData entries like relay Aggregator.GenerateExtraData
    * - simple: keccak(ValidatorsData) and compressed aggregated G1 key
@@ -428,11 +380,7 @@ export class ValidatorSetDeriver {
     const quorumThreshold = this.calcQuorumThreshold(config, totalVotingPower);
 
     // Get settlement status
-    const { status, integrity } = await this.getValsetStatus(
-      config.settlements,
-      epoch,
-      finalized,
-    );
+    const { status, integrity } = await this.getValsetStatus(config.settlements, epoch, finalized);
 
     const valset: ValidatorSet = {
       version: VALSET_VERSION,
@@ -773,7 +721,7 @@ export class ValidatorSetDeriver {
         const lastCommittedEpoch = await settlementContract.read.getLastCommittedHeaderEpoch({
           blockTag: toBlockTag(preferFinalized),
         });
-        
+
         lastCommitted = Math.min(lastCommitted, Number(lastCommittedEpoch));
       } catch (error) {
         console.error(`Failed to get status for settlement ${settlement.address}:`, error);

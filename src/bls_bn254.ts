@@ -5,10 +5,10 @@ import { keccak256 } from 'viem';
 // This is a lightweight implementation sufficient for building extraData only.
 
 const FP_MODULUS = BigInt(
-  '21888242871839275222246405745257275088548364400416034343698204186575808495617',
+  '0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47',
 );
-// (p+1)/4 used for Tonelli-Shanks on BN254 (as in the Go code)
-const SQRT_EXPONENT = BigInt('0x0c19139cb84c680a6e14116da060561765e05aa45a1c72a34f082305b61f3f52');
+// (p+1)/4 used for Tonelli-Shanks on BN254 (matches Go implementation)
+const SQRT_EXPONENT = BigInt('0xc19139cb84c680a6e14116da060561765e05aa45a1c72a34f082305b61f3f52');
 
 function mod(a: bigint, m: bigint = FP_MODULUS): bigint {
   const r = a % m;
@@ -49,7 +49,9 @@ function toHex(bytes: Uint8Array): Hex {
 }
 
 function bytesToBigIntBE(bytes: Uint8Array): bigint {
-  return BigInt('0x' + Buffer.from(bytes).toString('hex'));
+  // Preserve leading zeros by padding to the correct length
+  const hex = Buffer.from(bytes).toString('hex');
+  return BigInt('0x' + hex);
 }
 
 function bigIntToBytes32BE(x: bigint): Uint8Array {
@@ -78,22 +80,36 @@ function sqrtFp(beta: bigint): bigint {
 }
 
 export function findYFromX(x: bigint): bigint {
-  const beta = curveRhs(x);
-  return sqrtFp(beta);
+  // Go: Calculate beta = x^3 + 3 mod p
+  const beta = mod(modPow(mod(x), 3n) + 3n);
+  
+  // Go: Calculate y = beta^((p+1)/4) mod p
+  return modPow(beta, SQRT_EXPONENT);
 }
 
 export function compressG1FromXY(x: bigint, y: bigint): Hex {
-  const derivedY = findYFromX(x);
-  const flag = y !== derivedY ? 1n : 0n;
-  const compressed = mod(2n * x + flag);
+  const xMod = mod(x);
+  const yMod = mod(y);
+  const derivedY = findYFromX(xMod);
+
+  const flag = yMod === derivedY ? 0n : 1n;
+  const compressed = 2n * xMod + flag;
+
   return toHex(bigIntToBytes32BE(compressed));
 }
 
 export function parseG1Uncompressed(raw: Hex): G1 {
   const bytes = fromHex(raw);
   if (bytes.length < 64) throw new Error('Expected 64-byte uncompressed G1');
-  const x = bytesToBigIntBE(bytes.subarray(bytes.length - 64, bytes.length - 32));
-  const y = bytesToBigIntBE(bytes.subarray(bytes.length - 32));
+  
+  // Extract X and Y coordinates directly from hex string to preserve leading zeros
+  const hex = raw.startsWith('0x') ? raw.slice(2) : raw;
+  const xHex = hex.slice(0, 64);
+  const yHex = hex.slice(64, 128);
+
+  const x = BigInt('0x' + xHex);
+  const y = BigInt('0x' + yHex.padStart(64, '0'));
+
   return { x: mod(x), y: mod(y) };
 }
 

@@ -53,7 +53,7 @@ const deriver = new ValidatorSetDeriver({
 
 // Initialize with cache
 const deriverWithCache = new ValidatorSetDeriver({
-  rpcUrls: [...],
+  rpcUrls: ["..."],
   driverAddress: { chainId: 1, address: '0x...' },
   cache: new MemoryCache(),
   maxSavedEpochs: 100
