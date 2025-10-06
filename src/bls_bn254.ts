@@ -4,9 +4,7 @@ import { keccak256 } from 'viem';
 // Minimal BN254 (altbn128) helpers for G1 in affine coordinates.
 // This is a lightweight implementation sufficient for building extraData only.
 
-const FP_MODULUS = BigInt(
-  '0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47',
-);
+const FP_MODULUS = BigInt('0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47');
 // (p+1)/4 used for Tonelli-Shanks on BN254 (matches Go implementation)
 const SQRT_EXPONENT = BigInt('0xc19139cb84c680a6e14116da060561765e05aa45a1c72a34f082305b61f3f52');
 
@@ -69,20 +67,10 @@ function isInfinity(p: G1): p is null {
 
 // equality not required by current usage
 
-// y^2 = x^3 + 3 mod p
-function curveRhs(x: bigint): bigint {
-  return mod(modMul(modMul(x, x), x) + 3n);
-}
-
-function sqrtFp(beta: bigint): bigint {
-  // BN254 has p % 4 == 3, so sqrt = beta^((p+1)/4)
-  return modPow(beta, SQRT_EXPONENT);
-}
-
 export function findYFromX(x: bigint): bigint {
   // Go: Calculate beta = x^3 + 3 mod p
   const beta = mod(modPow(mod(x), 3n) + 3n);
-  
+
   // Go: Calculate y = beta^((p+1)/4) mod p
   return modPow(beta, SQRT_EXPONENT);
 }
@@ -101,7 +89,7 @@ export function compressG1FromXY(x: bigint, y: bigint): Hex {
 export function parseG1Uncompressed(raw: Hex): G1 {
   const bytes = fromHex(raw);
   if (bytes.length < 64) throw new Error('Expected 64-byte uncompressed G1');
-  
+
   // Extract X and Y coordinates directly from hex string to preserve leading zeros
   const hex = raw.startsWith('0x') ? raw.slice(2) : raw;
   const xHex = hex.slice(0, 64);

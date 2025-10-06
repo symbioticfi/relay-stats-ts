@@ -7,7 +7,7 @@ export default [
     languageOptions: { globals: globals.node }
   },
   {
-    ignores: ['dist/**', 'node_modules/**', '**/*.d.ts']
+    ignores: ['dist/**', 'examples/dist/**', 'node_modules/**', '**/*.d.ts']
   },
   ...tseslint.configs.recommended,
 ];
