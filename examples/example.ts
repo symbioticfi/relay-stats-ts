@@ -26,7 +26,7 @@ import { fileURLToPath } from 'url';
       console.log('✅ Deriver initialized successfully!\n');
   
       // Get the current epoch number
-      let currentEpoch;
+      let currentEpoch: number;
       try {
         currentEpoch = await deriver.getCurrentEpoch();
         console.log(`Current Epoch: ${currentEpoch}\n`);
@@ -39,9 +39,8 @@ import { fileURLToPath } from 'url';
   
       // Get network configuration for current epoch
       console.log('=== Network Configuration (Current Epoch) ===');
-      let config;
       try {
-        config = await deriver.getCurrentNetworkConfig();
+        const config = await deriver.getCurrentNetworkConfig();
         console.log(`Voting Power Providers: ${config.votingPowerProviders.length}`);
         console.log(`Keys Provider: Chain ${config.keysProvider.chainId}, ${config.keysProvider.address}`);
         console.log(`Settlements: ${config.settlements.length}`);
@@ -60,7 +59,7 @@ import { fileURLToPath } from 'url';
   
       // Get validator set for epoch 1
       console.log('=== Validator Set for Epoch 1 ===');
-      let epoch1Valset;
+      let epoch1Valset: ValidatorSet | null = null;
       try {
         epoch1Valset = await deriver.getValidatorSet(1);
         displayValidatorSet(epoch1Valset, 1);
@@ -72,7 +71,7 @@ import { fileURLToPath } from 'url';
   
       // Get validator set for current epoch
       console.log(`\n=== Validator Set for Current Epoch (${currentEpoch}) ===`);
-      let currentValset;
+      let currentValset: ValidatorSet | null = null;
       try {
         currentValset = await deriver.getCurrentValidatorSet();
         displayValidatorSet(currentValset, currentEpoch);
@@ -99,18 +98,18 @@ import { fileURLToPath } from 'url';
       // Display settlement status from validator set
       if (currentValset) {
         console.log('\n=== Settlement Status (Current Epoch) ===');
-        console.log(`Settlement Status: ${getStatusEmoji(currentValset.settlementStatus)} ${currentValset.settlementStatus}`);
-        console.log(`Integrity Status: ${currentValset.integrityStatus === 'valid' ? '✅' : '❌'} ${currentValset.integrityStatus}`);
-        
-        if (currentValset.settlementStatus === 'committed' && currentValset.integrityStatus === 'valid') {
+        console.log(`Settlement Status: ${getStatusEmoji(currentValset.status)} ${currentValset.status}`);
+        console.log(`Integrity Status: ${currentValset.integrity === 'valid' ? '✅' : '❌'} ${currentValset.integrity}`);
+
+        if (currentValset.status === 'committed' && currentValset.integrity === 'valid') {
           console.log('✅ All settlements are committed and in sync');
         } else {
-          if (currentValset.settlementStatus === 'pending') {
+          if (currentValset.status === 'pending') {
             console.log('⏳ Some settlements are still pending (expected for current epoch)');
-          } else if (currentValset.settlementStatus === 'missing') {
+          } else if (currentValset.status === 'missing') {
             console.log('⚠️  Some settlements are missing - this indicates an issue');
           }
-          if (currentValset.integrityStatus === 'invalid') {
+          if (currentValset.integrity === 'invalid') {
             console.log('❌ Settlement integrity check failed - hashes do not match!');
           }
         }
