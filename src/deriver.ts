@@ -690,8 +690,14 @@ export class ValidatorSetDeriver {
       throw new Error(`No quorum threshold for key tag ${config.requiredHeaderKeyTag}`);
     }
 
-    // Normalize threshold: totalVotingPower * quorumThreshold / 10^18, rounded up by +1
-    return (totalVotingPower * threshold.quorumThreshold) / 1000000000000000000n + 1n;
+    if (threshold.quorumThreshold === 0n) {
+      throw new Error(`Quorum threshold for key tag ${config.requiredHeaderKeyTag} is zero`);
+    }
+
+    const maxThreshold = 1000000000000000000n;
+    const mul = totalVotingPower * threshold.quorumThreshold;
+    const div = mul / maxThreshold;
+    return div + 1n;
   }
 
   private async getValsetStatus(

@@ -8,6 +8,18 @@ TypeScript utilities for deriving Symbiotic validator-set data from on-chain con
 
 ## Installation
 
+### Local installation
+
+```bash
+git clone https://github.com/symbioticfi/relay-stats-ts.git
+cd relay-stats-ts
+npm install            # builds the library via the prepare hook
+```
+
+You can now import from the `src/` or `dist/` folders locally, or run the example script (see [`examples/README.md`](examples/README.md)).
+
+### From npm
+
 ```bash
 npm install @symbioticfi/relay-stats-ts
 # or
@@ -40,18 +52,16 @@ console.log(`Integrity: ${validatorSet.integrity}`);
 
 ### Aggregator extra data
 
-The library can also produce the extra-data payloads used by Relay aggregators:
-
 ```ts
 const extraData = await deriver.getAggregatorsExtraData('zk');
 extraData.forEach(({ key, value }) => console.log(key, value));
 ```
 
-Pass `'simple'` for the simple mode or provide custom `keyTags` when you need non-default key selection.
+Pass `'simple'` for simple mode or provide custom `keyTags` when you need non-default key selection.
 
 ## Caching
 
-`ValidatorSetDeriver` accepts any cache that conforms to the `CacheInterface` and will only persist finalized data. Implement the interface to integrate Redis, in-memory caches, or other stores:
+`ValidatorSetDeriver` accepts any cache that conforms to the `CacheInterface` and only persists finalized data. Implement the interface to integrate Redis, in-memory caches, or other stores:
 
 ```ts
 import type { CacheInterface } from '@symbioticfi/relay-stats-ts';
@@ -73,7 +83,7 @@ class MapCache implements CacheInterface {
 }
 
 const deriver = await ValidatorSetDeriver.create({
-  rpcUrls: [...],
+  rpcUrls: ["..."],
   driverAddress: {...},
   cache: new MapCache(),
 });
@@ -89,6 +99,10 @@ const deriver = await ValidatorSetDeriver.create({
 - SSZ helpers (`serializeValidatorSet`, `getValidatorSetRoot`, etc.) exported via `index.ts`.
 
 Refer to `src/types.ts` for full type definitions.
+
+## Example script
+
+See [`examples/README.md`](examples/README.md) for step-by-step instructions on running the demonstration script against your own RPC endpoints.
 
 ## Development
 
