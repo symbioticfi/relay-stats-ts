@@ -1,7 +1,16 @@
 // example/example.ts
-import { ValidatorSetDeriver } from '@symbioticfi/relay-stats-ts';
-import type { ValidatorSet } from '@symbioticfi/relay-stats-ts';
+import { ValidatorSetDeriver, AGGREGATOR_MODE } from '@symbioticfi/relay-stats-ts';
+import type { ValidatorSet, NetworkData, AggregatorExtraDataEntry } from '@symbioticfi/relay-stats-ts';
+import type { Address } from 'viem';
 import { fileURLToPath } from 'url';
+
+const DEFAULT_RPC_URLS = ['http://localhost:8545', 'http://localhost:8546'];
+const DEFAULT_DRIVER_ADDRESS: Address = '0xE1A1629C2a0447eA1e787527329805B234ac605C';
+const DEFAULT_DRIVER_CHAIN_ID = 31337;
+
+const rpcUrls = parseRpcUrls(process.env.RELAY_STATS_RPC_URLS);
+const driverChainId = parseChainId(process.env.RELAY_STATS_DRIVER_CHAIN_ID);
+const driverAddress = parseDriverAddress(process.env.RELAY_STATS_DRIVER_ADDRESS);
   
   /**
    * Main example demonstrating validator set derivation
@@ -11,14 +20,15 @@ import { fileURLToPath } from 'url';
     
     try {
       // Initialize the deriver without cache
+      console.log(`RPC URLs: ${rpcUrls.map((url) => shortUrl(url)).join(', ')}`);
+      console.log(`Driver Chain ID: ${driverChainId}`);
+      console.log(`Driver Address: ${driverAddress}`);
+
       const deriver = await ValidatorSetDeriver.create({
-          rpcUrls: [
-            'http://localhost:8545', // got from symbiotic-super-sum
-            'http://localhost:8546',
-          ],
+          rpcUrls,
           driverAddress: {
-            chainId: 31337,
-            address: '0xE1A1629C2a0447eA1e787527329805B234ac605C',
+            chainId: driverChainId,
+            address: driverAddress,
           },
           cache: null,
         });
@@ -56,7 +66,18 @@ import { fileURLToPath } from 'url';
         console.log('   or the contract is not properly deployed.\n');
         return;
       }
-  
+
+      // Fetch additional network metadata (NETWORK/SUBNETWORK + EIP-712 domain)
+      try {
+        const networkData = await deriver.getNetworkData();
+        displayNetworkData(networkData);
+      } catch (error) {
+        console.log('⚠️  Could not fetch network extra data');
+        console.log(
+          `   Reason: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      }
+
       // Get validator set for epoch 1
       console.log('=== Validator Set for Epoch 1 ===');
       let epoch1Valset: ValidatorSet | null = null;
@@ -94,30 +115,7 @@ import { fileURLToPath } from 'url';
         console.log('\n=== Epoch Comparison ===');
         console.log('⚠️  Cannot compare epochs - validator sets not available');
       }
-  
-      // Display settlement status from validator set
-      if (currentValset) {
-        console.log('\n=== Settlement Status (Current Epoch) ===');
-        console.log(`Settlement Status: ${getStatusEmoji(currentValset.status)} ${currentValset.status}`);
-        console.log(`Integrity Status: ${currentValset.integrity === 'valid' ? '✅' : '❌'} ${currentValset.integrity}`);
 
-        if (currentValset.status === 'committed' && currentValset.integrity === 'valid') {
-          console.log('✅ All settlements are committed and in sync');
-        } else {
-          if (currentValset.status === 'pending') {
-            console.log('⏳ Some settlements are still pending (expected for current epoch)');
-          } else if (currentValset.status === 'missing') {
-            console.log('⚠️  Some settlements are missing - this indicates an issue');
-          }
-          if (currentValset.integrity === 'invalid') {
-            console.log('❌ Settlement integrity check failed - hashes do not match!');
-          }
-        }
-      } else {
-        console.log('\n=== Settlement Status (Current Epoch) ===');
-        console.log('⚠️  Cannot check settlement status - validator set not available');
-      }
-  
       // Get top 10 operators with all data
       if (currentValset) {
         console.log('\n=== Top 10 Operators (Current Epoch) ===');
@@ -139,15 +137,48 @@ import { fileURLToPath } from 'url';
           });
           console.log(`   Keys (${validator.keys.length}):`);
           validator.keys.forEach((key, keyIndex) => {
-            console.log(`     ${keyIndex + 1}. Tag ${key.tag}: ${key.payload.slice(0, 10)}...`);
+            console.log(`     ${keyIndex + 1}. Tag ${key.tag}: ${key.payload}`);
           });
         });
       } else {
         console.log('\n=== Top 10 Operators (Current Epoch) ===');
         console.log('⚠️  Cannot show operators - validator set not available');
       }
-  
-  
+
+
+      // Fetch aggregator extra data for relayer/aggregator flows
+      console.log('\n=== Aggregator Extra Data ===');
+      try {
+        const simpleExtraData = await deriver.getAggregatorsExtraData(
+          AGGREGATOR_MODE.SIMPLE,
+          undefined,
+          true,
+          currentEpoch,
+        );
+        displayAggregatorExtraData('Simple', simpleExtraData);
+      } catch (error) {
+        console.log('⚠️  Simple mode unavailable');
+        console.log(
+          `   Reason: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+      try {
+        const zkExtraData = await deriver.getAggregatorsExtraData(
+          AGGREGATOR_MODE.ZK,
+          undefined,
+          true,
+          currentEpoch,
+        );
+        displayAggregatorExtraData('ZK', zkExtraData);
+      } catch (error) {
+        console.log('⚠️  ZK mode unavailable');
+        console.log(
+          `   Reason: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
+
         } catch (error) {
       console.error('❌ Failed to initialize deriver:', error instanceof Error ? error.message : String(error));
       console.log('\n💡 This indicates:');
@@ -158,7 +189,77 @@ import { fileURLToPath } from 'url';
       return;
     }
   }
-  
+
+  function displayNetworkData(networkData: NetworkData) {
+    console.log('\n=== Network Extra Data ===');
+    console.log(`Network Address: ${networkData.address}`);
+    console.log(`Subnetwork ID: ${networkData.subnetwork}`);
+    console.log('EIP-712 Domain:');
+    console.log(`  Name: ${networkData.eip712Data.name}`);
+    console.log(`  Version: ${networkData.eip712Data.version}`);
+    console.log(`  Chain ID: ${networkData.eip712Data.chainId.toString()}`);
+    console.log(`  Verifying Contract: ${networkData.eip712Data.verifyingContract}`);
+    console.log(`  Salt: ${networkData.eip712Data.salt}`);
+    if (networkData.eip712Data.extensions.length > 0) {
+      console.log('  Extensions:');
+      networkData.eip712Data.extensions.forEach((ext, index) => {
+        console.log(`    ${index + 1}. ${ext.toString()}`);
+      });
+    }
+  }
+
+  function parseRpcUrls(raw: string | undefined): string[] {
+    if (!raw) {
+      return DEFAULT_RPC_URLS;
+    }
+
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const urls = parsed.map((value) => String(value).trim()).filter(Boolean);
+        if (urls.length > 0) {
+          return urls;
+        }
+      }
+    } catch {
+      // fall through to delimiter-based parsing
+    }
+
+    const split = raw
+      .split(/[\n,]/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    return split.length > 0 ? split : DEFAULT_RPC_URLS;
+  }
+
+  function parseChainId(raw: string | undefined): number {
+    if (!raw) {
+      return DEFAULT_DRIVER_CHAIN_ID;
+    }
+    const parsed = Number.parseInt(raw, 10);
+    if (Number.isNaN(parsed)) {
+      console.warn(
+        `Invalid RELAY_STATS_DRIVER_CHAIN_ID="${raw}". Falling back to ${DEFAULT_DRIVER_CHAIN_ID}.`,
+      );
+      return DEFAULT_DRIVER_CHAIN_ID;
+    }
+    return parsed;
+  }
+
+  function parseDriverAddress(raw: string | undefined): Address {
+    if (!raw) {
+      return DEFAULT_DRIVER_ADDRESS;
+    }
+    const trimmed = raw.trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(trimmed)) {
+      console.warn(
+        `Invalid RELAY_STATS_DRIVER_ADDRESS="${trimmed}". Falling back to ${DEFAULT_DRIVER_ADDRESS}.`,
+      );
+      return DEFAULT_DRIVER_ADDRESS;
+    }
+    return trimmed as Address;
+  }
+
   /**
    * Helper function to display validator set information
    */
@@ -175,6 +276,23 @@ import { fileURLToPath } from 'url';
       // Calculate percentage for display (threshold is in absolute units)
       console.log(`Quorum Threshold: ${valset.quorumThreshold.toString()}`);
       console.log(`Required Key Tag: ${valset.requiredKeyTag}`);
+      console.log(`Validator Set Status: ${getStatusEmoji(valset.status)} ${valset.status}`);
+      console.log(
+        `Validator Set Integrity: ${valset.integrity === 'valid' ? '✅' : '❌'} ${valset.integrity}`,
+      );
+
+      if (valset.status === 'committed' && valset.integrity === 'valid') {
+        console.log('  ✅ Validator set is committed and integrity verified.');
+      } else {
+        if (valset.status === 'pending') {
+          console.log('  ⏳ Validator set is pending on-chain updates.');
+        } else if (valset.status === 'missing') {
+          console.log('  ⚠️ Validator set data is missing - investigate driver and settlements.');
+        }
+        if (valset.integrity === 'invalid') {
+          console.log('  ❌ Integrity check failed - header hashes do not match.');
+        }
+      }
       
       // Show voting power distribution
       if (activeValidators.length > 0) {
@@ -191,7 +309,21 @@ import { fileURLToPath } from 'url';
       console.log(`⚠️  Error displaying validator set for epoch ${epoch}:`, error instanceof Error ? error.message : String(error));
     }
   }
-  
+
+  function displayAggregatorExtraData(
+    modeLabel: string,
+    entries: AggregatorExtraDataEntry[],
+  ) {
+    if (entries.length === 0) {
+      console.log(`- ${modeLabel}: no entries returned`);
+      return;
+    }
+    console.log(`- ${modeLabel}:`);
+    entries.forEach((entry, index) => {
+      console.log(`    ${index + 1}. key=${entry.key} value=${entry.value}`);
+    });
+  }
+
   /**
    * Helper function to get status emoji
    */
@@ -203,7 +335,18 @@ import { fileURLToPath } from 'url';
       default: return '❓';
     }
   }
-  
+
+  function shortUrl(url: string, maxLength: number = 36): string {
+    if (url.length <= maxLength) {
+      return url;
+    }
+    const half = Math.floor((maxLength - 3) / 2);
+    if (half <= 0) {
+      return '...';
+    }
+    return `${url.slice(0, half)}...${url.slice(-half)}`;
+  }
+
   // Run the example (ESM-friendly main check)
   const isMainModule = process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
   if (isMainModule) {

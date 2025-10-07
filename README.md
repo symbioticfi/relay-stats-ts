@@ -13,10 +13,11 @@ TypeScript utilities for deriving Symbiotic validator-set data from on-chain con
 ```bash
 git clone https://github.com/symbioticfi/relay-stats-ts.git
 cd relay-stats-ts
-npm install            # builds the library via the prepare hook
+npm install            # install dependencies
+npm run build          # compile TypeScript to dist/
 ```
 
-You can now import from the `src/` or `dist/` folders locally, or run the example script (see [`examples/README.md`](examples/README.md)).
+You can now import from the `src/` or freshly built `dist/` folders locally, or run the example script (see [`examples/README.md`](examples/README.md)).
 
 ### From npm
 

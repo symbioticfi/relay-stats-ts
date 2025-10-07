@@ -35,6 +35,16 @@ Edit `examples/example.ts` and replace the placeholders with values that match y
 
 If your RPC provider requires API keys, inject them via environment variables (e.g., `process.env.MAINNET_RPC`) instead of committing secrets.
 
+Prefer not to edit the file? Export the environment variables instead:
+
+```bash
+export RELAY_STATS_RPC_URLS='["http://localhost:8545","http://localhost:8546"]'
+export RELAY_STATS_DRIVER_CHAIN_ID=31337
+export RELAY_STATS_DRIVER_ADDRESS=0xE1A1629C2a0447eA1e787527329805B234ac605C
+```
+
+`RELAY_STATS_RPC_URLS` accepts comma-, newline-, or JSON array-separated values. Leaving the variables unset falls back to the same local devnet defaults shown above.
+
 ## Step 4 – Run the script
 Choose one of the following approaches:
 
@@ -54,10 +64,12 @@ Choose one of the following approaches:
 ### What to expect
 On a healthy setup you will see logs for:
 1. Current network configuration and driver parameters
-2. Historical validator set (epoch 1)
-3. Current validator set, including voting power stats
-4. Settlement integrity and status indicators
-5. Top operators by voting power with their vaults and keys
+2. Network extra data (NETWORK/SUBNETWORK and settlement EIP-712 domain)
+3. Historical validator set (epoch 1)
+4. Current validator set, including voting power stats
+5. Validator set status and integrity indicators
+6. Top operators by voting power with their vaults and keys
+7. Aggregator extra data entries for both simple and zk modes
 
 If the RPC endpoints are unreachable or misconfigured you will see an `HTTP request failed` message. Double-check that the RPC URLs are correct, the driver contract exists at the specified address, and the devnet (if used) is fully booted.
 
