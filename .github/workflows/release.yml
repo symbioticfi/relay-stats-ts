@@ -1,0 +1,127 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type'
+        required: true
+        default: 'nightly'
+        type: choice
+        options:
+          - nightly
+          - official
+      version:
+        description: 'Version (only for official releases, e.g., 1.2.3)'
+        required: false
+        type: string
+  workflow_call:
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_call' && 'main' || github.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build project
+        run: npm run build
+
+      - name: Determine release type
+        id: release_info
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            echo "type=nightly" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == refs/tags/* ]]; then
+            echo "type=official" >> $GITHUB_OUTPUT
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "type=${{ github.event.inputs.release_type }}" >> $GITHUB_OUTPUT
+            if [[ "${{ github.event.inputs.release_type }}" == "official" ]]; then
+              echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            fi
+          elif [[ "${{ github.event_name }}" == "workflow_call" ]]; then
+            echo "type=nightly" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check for changes (nightly only)
+        id: changes
+        if: steps.release_info.outputs.type == 'nightly'
+        run: |
+          YESTERDAY=$(date -d "yesterday" +%Y-%m-%d || gdate -d "yesterday" +%Y-%m-%d)
+          COMMITS_SINCE=$(git rev-list --count --since="$YESTERDAY 00:00:00" HEAD)
+          if [[ "$COMMITS_SINCE" == "0" ]]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No changes since yesterday, skipping nightly build..."
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "Found $COMMITS_SINCE commits since yesterday"
+          fi
+
+      - name: Skip nightly if no changes
+        if: steps.release_info.outputs.type == 'nightly' && steps.changes.outputs.has_changes == 'false'
+        run: |
+          echo "Skipping nightly release - no changes detected"
+          exit 0
+
+      - name: Create nightly version
+        if: steps.release_info.outputs.type == 'nightly' && steps.changes.outputs.has_changes == 'true'
+        id: nightly_version
+        run: |
+          CURRENT_VERSION=$(node -p "require('./package.json').version")
+          BASE_VERSION=$(echo $CURRENT_VERSION | sed 's/-.*$//')
+          IFS='.' read -r major minor patch <<< "$BASE_VERSION"
+          INCREMENTED_PATCH=$((patch + 1))
+          INCREMENTED_VERSION="${major}.${minor}.${INCREMENTED_PATCH}"
+          DATE=$(date +%Y%m%d)
+          NIGHTLY_VERSION="${INCREMENTED_VERSION}-nightly.${DATE}"
+          echo "version=$NIGHTLY_VERSION" >> $GITHUB_OUTPUT
+          echo "Created nightly version: $NIGHTLY_VERSION"
+
+      - name: Create official version
+        if: steps.release_info.outputs.type == 'official'
+        id: official_version
+        run: |
+          VERSION="${{ steps.release_info.outputs.version }}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Official version: $VERSION"
+
+      - name: Update package.json version
+        run: |
+          if [[ "${{ steps.release_info.outputs.type }}" == "nightly" ]]; then
+            VERSION="${{ steps.nightly_version.outputs.version }}"
+          else
+            VERSION="${{ steps.official_version.outputs.version }}"
+          fi
+          npm version $VERSION --no-git-tag-version
+          echo "Updated package.json to version: $VERSION"
+
+      - name: Publish to npm (nightly)
+        if: steps.release_info.outputs.type == 'nightly' && steps.changes.outputs.has_changes == 'true'
+        run: |
+          npm publish --tag nightly --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish to npm (official)
+        if: steps.release_info.outputs.type == 'official'
+        run: |
+          npm publish --tag latest --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
