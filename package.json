@@ -1,6 +1,6 @@
 {
     "name": "@symbioticfi/relay-stats-ts",
-    "version": "1.0.0",
+    "version": "0.2.0",
     "description": "TypeScript library for deriving validator sets from Symbiotic network contracts",
     "type": "module",
     "main": "dist/index.js",
