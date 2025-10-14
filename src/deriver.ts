@@ -441,7 +441,6 @@ export class ValidatorSetDeriver {
     }
 
     const config = await this.getNetworkConfig(targetEpoch, finalized);
-    const driver = this.getDriverContract();
 
     const timestamp = await this.getEpochStart(targetEpoch, finalized);
 
@@ -1022,7 +1021,9 @@ export class ValidatorSetDeriver {
     return state.map.get(epoch) ?? null;
   }
 
-  private mapExtraDataEntries(rawExtraData: readonly { key: Hex; value: Hex }[]): ValSetExtraData[] {
+  private mapExtraDataEntries(
+    rawExtraData: readonly { key: Hex; value: Hex }[],
+  ): ValSetExtraData[] {
     if (!rawExtraData || rawExtraData.length === 0) return [];
     return rawExtraData.map((entry) => ({
       key: entry.key as Hex,
@@ -1216,7 +1217,11 @@ export class ValidatorSetDeriver {
       );
     }
 
-    const settlement = await this.selectSettlementForEvent(targetEpoch, finalized, options?.settlement);
+    const settlement = await this.selectSettlementForEvent(
+      targetEpoch,
+      finalized,
+      options?.settlement,
+    );
 
     const event = await this.retrieveValSetEvent({
       epoch: targetEpoch,
@@ -1226,7 +1231,9 @@ export class ValidatorSetDeriver {
     });
 
     if (!event) {
-      throw new Error(`No validator set event found for epoch ${targetEpoch} using ${blockTag} data.`);
+      throw new Error(
+        `No validator set event found for epoch ${targetEpoch} using ${blockTag} data.`,
+      );
     }
 
     return event;
