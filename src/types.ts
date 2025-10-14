@@ -86,6 +86,26 @@ export interface ValidatorSetHeader {
   validatorsSszMRoot: Hex;
 }
 
+// Aggregator extra data entry (key/value are bytes32)
+export interface AggregatorExtraDataEntry {
+  key: Hex;
+  value: Hex;
+}
+
+export type ValSetExtraData = AggregatorExtraDataEntry;
+
+export type ValSetEventKind = 'genesis' | 'commit';
+
+export interface ValSetLogicEvent {
+  kind: ValSetEventKind;
+  header: ValidatorSetHeader;
+  extraData: ValSetExtraData[];
+  blockNumber: bigint | null;
+  blockHash: Hex | null;
+  transactionHash: Hex | null;
+  logIndex: number | null;
+}
+
 export interface OperatorVotingPower {
   operator: Address;
   vaults: VaultVotingPower[];
@@ -115,12 +135,6 @@ export interface NetworkData {
   address: Address;
   subnetwork: Hex;
   eip712Data: Eip712Domain;
-}
-
-// Aggregator extra data entry (key/value are bytes32)
-export interface AggregatorExtraDataEntry {
-  key: Hex;
-  value: Hex;
 }
 
 export interface CacheInterface {

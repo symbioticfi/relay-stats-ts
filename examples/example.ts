@@ -1,6 +1,15 @@
 // example/example.ts
 import { ValidatorSetDeriver, AGGREGATOR_MODE } from '@symbioticfi/relay-stats-ts';
-import type { ValidatorSet, NetworkData, AggregatorExtraDataEntry } from '@symbioticfi/relay-stats-ts';
+import type {
+  ValidatorSet,
+  NetworkData,
+  AggregatorExtraDataEntry,
+  NetworkConfig,
+  ValSetLogicEvent,
+  ValSetExtraData,
+  ValSetEventKind,
+  CrossChainAddress,
+} from '@symbioticfi/relay-stats-ts';
 import type { Address } from 'viem';
 import { fileURLToPath } from 'url';
 
@@ -49,17 +58,20 @@ const driverAddress = parseDriverAddress(process.env.RELAY_STATS_DRIVER_ADDRESS)
   
       // Get network configuration for current epoch
       console.log('=== Network Configuration (Current Epoch) ===');
+      let networkConfig: NetworkConfig | null = null;
       try {
-        const config = await deriver.getCurrentNetworkConfig();
-        console.log(`Voting Power Providers: ${config.votingPowerProviders.length}`);
-        console.log(`Keys Provider: Chain ${config.keysProvider.chainId}, ${config.keysProvider.address}`);
-        console.log(`Settlements: ${config.settlements.length}`);
-        console.log(`Max Voting Power: ${config.maxVotingPower.toString()}`);
-        console.log(`Min Inclusion Voting Power: ${config.minInclusionVotingPower.toString()}`);
-        console.log(`Max Validators Count: ${config.maxValidatorsCount.toString()}`);
-        console.log(`Required Header Key Tag: ${config.requiredHeaderKeyTag}`);
-        console.log(`Number of Committers: ${config.numCommitters}`);
-        console.log(`Number of Aggregators: ${config.numAggregators}\n`);
+        networkConfig = await deriver.getCurrentNetworkConfig();
+        console.log(`Voting Power Providers: ${networkConfig.votingPowerProviders.length}`);
+        console.log(
+          `Keys Provider: Chain ${networkConfig.keysProvider.chainId}, ${networkConfig.keysProvider.address}`,
+        );
+        console.log(`Settlements: ${networkConfig.settlements.length}`);
+        console.log(`Max Voting Power: ${networkConfig.maxVotingPower.toString()}`);
+        console.log(`Min Inclusion Voting Power: ${networkConfig.minInclusionVotingPower.toString()}`);
+        console.log(`Max Validators Count: ${networkConfig.maxValidatorsCount.toString()}`);
+        console.log(`Required Header Key Tag: ${networkConfig.requiredHeaderKeyTag}`);
+        console.log(`Number of Committers: ${networkConfig.numCommitters}`);
+        console.log(`Number of Aggregators: ${networkConfig.numAggregators}\n`);
       } catch {
         console.log('❌ Could not get network configuration from contract');
         console.log('   This indicates the contract does not have the getConfigAt() method implemented');
@@ -93,6 +105,7 @@ const driverAddress = parseDriverAddress(process.env.RELAY_STATS_DRIVER_ADDRESS)
       // Get validator set for current epoch
       console.log(`\n=== Validator Set for Current Epoch (${currentEpoch}) ===`);
       let currentValset: ValidatorSet | null = null;
+      let currentValsetStatus: { status: 'committed' | 'pending' | 'missing'; integrity: 'valid' | 'invalid' } | null = null;
       try {
         currentValset = await deriver.getCurrentValidatorSet();
         displayValidatorSet(currentValset, currentEpoch);
@@ -100,6 +113,17 @@ const driverAddress = parseDriverAddress(process.env.RELAY_STATS_DRIVER_ADDRESS)
         console.log('❌ Could not get validator set for current epoch');
         console.log('   This indicates missing contract methods or insufficient data');
         currentValset = null;
+      }
+
+      try {
+        currentValsetStatus = await deriver.getValSetStatus(currentEpoch);
+        console.log(
+          `Validator Set Status (via getValSetStatus): ${getStatusEmoji(currentValsetStatus.status)} ${currentValsetStatus.status}, integrity ${currentValsetStatus.integrity}`,
+        );
+      } catch (error) {
+        console.log('⚠️  Could not fetch validator set status');
+        console.log(`   Reason: ${error instanceof Error ? error.message : String(error)}`);
+        currentValsetStatus = null;
       }
   
       // Compare epochs
@@ -145,6 +169,58 @@ const driverAddress = parseDriverAddress(process.env.RELAY_STATS_DRIVER_ADDRESS)
         console.log('⚠️  Cannot show operators - validator set not available');
       }
 
+      if (currentValset) {
+        console.log('\n=== Validator Set Header Utilities ===');
+        const activeVotingPower = deriver.getTotalActiveVotingPower(currentValset);
+        console.log(`Total Active Voting Power: ${activeVotingPower.toString()}`);
+
+        const header = deriver.getValidatorSetHeader(currentValset);
+        console.log('Validator Set Header:');
+        console.log(`  Epoch: ${header.epoch}`);
+        console.log(`  Capture Timestamp: ${header.captureTimestamp}`);
+        console.log(`  Validators SSZ Root: ${header.validatorsSszMRoot}`);
+
+        const encodedHeader = deriver.abiEncodeValidatorSetHeader(header);
+        console.log(`ABI Encoded Header: ${encodedHeader}`);
+
+        const headerHash = deriver.hashValidatorSetHeader(header);
+        console.log(`Header Hash (from header): ${headerHash}`);
+
+        const computedHashViaSet = deriver.getValidatorSetHeaderHash(currentValset);
+        console.log(`Header Hash (from validator set): ${computedHashViaSet}`);
+      }
+
+
+      let epochIndexForCapture: number | null = null;
+      console.log('\n=== Epoch Timeline ===');
+      try {
+        const currentEpochDurationVal = await deriver.getCurrentEpochDuration();
+        const currentEpochStartVal = await deriver.getCurrentEpochStart();
+        const nextEpochNumber = await deriver.getNextEpoch();
+        const nextEpochStartVal = await deriver.getNextEpochStart();
+        const nextEpochDurationVal = await deriver.getNextEpochDuration();
+        const epochDurationForCurrent = await deriver.getEpochDuration(currentEpoch);
+        const epochStartForCurrent = await deriver.getEpochStart(currentEpoch);
+
+        console.log(`Current Epoch Start: ${currentEpochStartVal}`);
+        console.log(`Current Epoch Duration: ${currentEpochDurationVal}`);
+        console.log(`Next Epoch: ${nextEpochNumber}`);
+        console.log(`Next Epoch Start: ${nextEpochStartVal}`);
+        console.log(`Next Epoch Duration: ${nextEpochDurationVal}`);
+        console.log(`Epoch Duration (index ${currentEpoch}): ${epochDurationForCurrent}`);
+        console.log(`Epoch Start (index ${currentEpoch}): ${epochStartForCurrent}`);
+
+        if (currentValset) {
+          epochIndexForCapture = await deriver.getEpochIndex(currentValset.captureTimestamp);
+          console.log(
+            `Epoch index for capture timestamp ${currentValset.captureTimestamp}: ${epochIndexForCapture}`,
+          );
+        }
+      } catch (error) {
+        console.log('⚠️  Could not fetch epoch timeline info');
+        console.log(`   Reason: ${error instanceof Error ? error.message : String(error)}`);
+      }
+
 
       // Fetch aggregator extra data for relayer/aggregator flows
       console.log('\n=== Aggregator Extra Data ===');
@@ -176,6 +252,44 @@ const driverAddress = parseDriverAddress(process.env.RELAY_STATS_DRIVER_ADDRESS)
         console.log(
           `   Reason: ${error instanceof Error ? error.message : String(error)}`,
         );
+      }
+
+      console.log('\n=== Settlement ValSet Events (Current Epoch) ===');
+      if (networkConfig && networkConfig.settlements.length > 0) {
+        if (currentValsetStatus && currentValsetStatus.status !== 'committed') {
+          console.log(
+            `Validator set is ${currentValsetStatus.status}; skipping settlement event retrieval until committed.`,
+          );
+        } else {
+          for (const settlement of networkConfig.settlements) {
+            console.log(
+              `Using settlement on chain ${settlement.chainId}: ${settlement.address}`,
+            );
+            await tryDisplayValSetEvent(
+              deriver,
+              settlement,
+              currentEpoch,
+              'By epoch lookup',
+              `epoch ${currentEpoch}`,
+            );
+
+            if (epochIndexForCapture !== null) {
+              await tryDisplayValSetEvent(
+                deriver,
+                settlement,
+                epochIndexForCapture,
+                'By capture timestamp lookup',
+                currentValset
+                  ? `timestamp ${currentValset.captureTimestamp} (epoch ${epochIndexForCapture})`
+                  : `epoch ${epochIndexForCapture}`,
+              );
+            } else if (currentValset) {
+              console.log('⚠️  Epoch index for capture timestamp unavailable; skipping timestamp lookup.');
+            }
+          }
+        }
+      } else {
+        console.log('⚠️  No settlement configured; cannot demonstrate settlement events.');
       }
 
 
@@ -310,6 +424,65 @@ const driverAddress = parseDriverAddress(process.env.RELAY_STATS_DRIVER_ADDRESS)
     }
   }
 
+  async function tryDisplayValSetEvent(
+    deriver: ValidatorSetDeriver,
+    settlement: CrossChainAddress,
+    epoch: number,
+    label: string,
+    contextLabel: string,
+  ) {
+    const result = await fetchValSetEvent(deriver, settlement, epoch);
+    if (result.event) {
+      if (result.origin === 'latest' && result.reason) {
+        console.log(
+          `  ⚠️  Finalized lookup failed (${result.reason}). Fallback to latest succeeded.`,
+        );
+      }
+      displayValSetLogicEvent(label, result.event, settlement);
+    } else {
+      console.log(`⚠️  Failed to get event for ${contextLabel}`);
+      if (result.reason) {
+        console.log(`   Reason: ${result.reason}`);
+      }
+    }
+  }
+
+  async function fetchValSetEvent(
+    deriver: ValidatorSetDeriver,
+    settlement: CrossChainAddress,
+    epoch: number,
+  ): Promise<{
+    event: ValSetLogicEvent | null;
+    origin: 'finalized' | 'latest' | null;
+    reason?: string;
+  }> {
+    try {
+      const event = await deriver.getValSetLogicEvent({
+        epoch,
+        settlement,
+        finalized: true,
+      });
+      return { event, origin: 'finalized' };
+    } catch (finalizedError) {
+      const finalizedReason = formatError(finalizedError);
+      try {
+        const event = await deriver.getValSetLogicEvent({
+          epoch,
+          settlement,
+          finalized: false,
+        });
+        return { event, origin: 'latest', reason: finalizedReason };
+      } catch (latestError) {
+        const latestReason = formatError(latestError);
+        return {
+          event: null,
+          origin: null,
+          reason: `Finalized failed: ${finalizedReason}; Latest failed: ${latestReason}`,
+        };
+      }
+    }
+  }
+
   function displayAggregatorExtraData(
     modeLabel: string,
     entries: AggregatorExtraDataEntry[],
@@ -319,6 +492,41 @@ const driverAddress = parseDriverAddress(process.env.RELAY_STATS_DRIVER_ADDRESS)
       return;
     }
     console.log(`- ${modeLabel}:`);
+    entries.forEach((entry, index) => {
+      console.log(`    ${index + 1}. key=${entry.key} value=${entry.value}`);
+    });
+  }
+
+  function displayValSetLogicEvent(
+    label: string,
+    event: ValSetLogicEvent,
+    settlement: CrossChainAddress,
+  ) {
+    console.log(`- ${label}`);
+    console.log(`  Settlement: chain ${settlement.chainId} at ${settlement.address}`);
+    console.log(`  Event Kind: ${formatValSetEventKind(event.kind)}`);
+    console.log(`  Epoch: ${event.header.epoch}`);
+    console.log(`  Capture Timestamp: ${event.header.captureTimestamp}`);
+    console.log(`  Total Voting Power: ${event.header.totalVotingPower.toString()}`);
+    console.log(`  Validators SSZ Root: ${event.header.validatorsSszMRoot}`);
+    if (event.blockNumber !== null) {
+      console.log(`  Block Number: ${event.blockNumber.toString()}`);
+    }
+    if (event.blockHash) {
+      console.log(`  Block Hash: ${event.blockHash}`);
+    }
+    if (event.transactionHash) {
+      console.log(`  Tx Hash: ${event.transactionHash}`);
+    }
+    displayValSetExtraData(event.extraData);
+  }
+
+  function displayValSetExtraData(entries: ValSetExtraData[]) {
+    if (!entries || entries.length === 0) {
+      console.log('  Extra Data: none');
+      return;
+    }
+    console.log('  Extra Data Entries:');
     entries.forEach((entry, index) => {
       console.log(`    ${index + 1}. key=${entry.key} value=${entry.value}`);
     });
@@ -345,6 +553,21 @@ const driverAddress = parseDriverAddress(process.env.RELAY_STATS_DRIVER_ADDRESS)
       return '...';
     }
     return `${url.slice(0, half)}...${url.slice(-half)}`;
+  }
+
+  function formatError(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  function formatValSetEventKind(kind: ValSetEventKind): string {
+    switch (kind) {
+      case 'genesis':
+        return 'SetGenesis';
+      case 'commit':
+        return 'CommitValSetHeader';
+      default:
+        return kind;
+    }
   }
 
   // Run the example (ESM-friendly main check)

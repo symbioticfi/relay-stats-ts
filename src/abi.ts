@@ -72,11 +72,60 @@ export const VALSET_DRIVER_ABI = [
     type: 'function',
   },
   {
+    inputs: [],
+    name: 'getCurrentEpochDuration',
+    outputs: [{ name: '', type: 'uint48', internalType: 'uint48' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [],
+    name: 'getCurrentEpochStart',
+    outputs: [{ name: '', type: 'uint48', internalType: 'uint48' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [],
+    name: 'getNextEpoch',
+    outputs: [{ name: '', type: 'uint48', internalType: 'uint48' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [],
+    name: 'getNextEpochDuration',
+    outputs: [{ name: '', type: 'uint48', internalType: 'uint48' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [],
+    name: 'getNextEpochStart',
+    outputs: [{ name: '', type: 'uint48', internalType: 'uint48' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
     type: 'function',
     name: 'getEpochStart',
     inputs: [{ name: 'epoch', type: 'uint48', internalType: 'uint48' }],
     outputs: [{ name: '', type: 'uint48', internalType: 'uint48' }],
     stateMutability: 'view',
+  },
+  {
+    inputs: [{ name: 'timestamp', type: 'uint48', internalType: 'uint48' }],
+    name: 'getEpochIndex',
+    outputs: [{ name: '', type: 'uint48', internalType: 'uint48' }],
+    stateMutability: 'view',
+    type: 'function',
+  },
+  {
+    inputs: [{ name: 'epoch', type: 'uint48', internalType: 'uint48' }],
+    name: 'getEpochDuration',
+    outputs: [{ name: '', type: 'uint48', internalType: 'uint48' }],
+    stateMutability: 'view',
+    type: 'function',
   },
   {
     inputs: [],
@@ -130,6 +179,74 @@ export const SETTLEMENT_ABI = [
       { name: 'extensions', type: 'uint256[]', internalType: 'uint256[]' },
     ],
     stateMutability: 'view',
+  },
+  {
+    type: 'event',
+    name: 'SetGenesis',
+    inputs: [
+      {
+        name: 'valSetHeader',
+        type: 'tuple',
+        internalType: 'struct ISettlement.ValSetHeader',
+        components: [
+          { name: 'version', type: 'uint8', internalType: 'uint8' },
+          { name: 'requiredKeyTag', type: 'uint8', internalType: 'uint8' },
+          { name: 'epoch', type: 'uint48', internalType: 'uint48' },
+          { name: 'captureTimestamp', type: 'uint48', internalType: 'uint48' },
+          { name: 'quorumThreshold', type: 'uint256', internalType: 'uint256' },
+          { name: 'totalVotingPower', type: 'uint256', internalType: 'uint256' },
+          {
+            name: 'validatorsSszMRoot',
+            type: 'bytes32',
+            internalType: 'bytes32',
+          },
+        ],
+      },
+      {
+        name: 'extraData',
+        type: 'tuple[]',
+        internalType: 'struct ISettlement.ExtraData[]',
+        components: [
+          { name: 'key', type: 'bytes32', internalType: 'bytes32' },
+          { name: 'value', type: 'bytes32', internalType: 'bytes32' },
+        ],
+      },
+    ],
+    anonymous: false,
+  },
+  {
+    type: 'event',
+    name: 'CommitValSetHeader',
+    inputs: [
+      {
+        name: 'valSetHeader',
+        type: 'tuple',
+        internalType: 'struct ISettlement.ValSetHeader',
+        components: [
+          { name: 'version', type: 'uint8', internalType: 'uint8' },
+          { name: 'requiredKeyTag', type: 'uint8', internalType: 'uint8' },
+          { name: 'epoch', type: 'uint48', internalType: 'uint48' },
+          { name: 'captureTimestamp', type: 'uint48', internalType: 'uint48' },
+          { name: 'quorumThreshold', type: 'uint256', internalType: 'uint256' },
+          { name: 'totalVotingPower', type: 'uint256', internalType: 'uint256' },
+          {
+            name: 'validatorsSszMRoot',
+            type: 'bytes32',
+            internalType: 'bytes32',
+          },
+        ],
+      },
+      {
+        name: 'extraData',
+        type: 'tuple[]',
+        internalType: 'struct ISettlement.ExtraData[]',
+        components: [
+          { name: 'key', type: 'bytes32', internalType: 'bytes32' },
+          { name: 'value', type: 'bytes32', internalType: 'bytes32' },
+        ],
+      },
+    ],
+    anonymous: false,
   },
 ] as const;
 
