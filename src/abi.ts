@@ -253,6 +253,34 @@ export const SETTLEMENT_ABI = [
 export const VOTING_POWER_PROVIDER_ABI = [
   {
     type: 'function',
+    name: 'getOperatorsAt',
+    inputs: [{ name: 'timestamp', type: 'uint48', internalType: 'uint48' }],
+    outputs: [{ name: '', type: 'address[]', internalType: 'address[]' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'getOperatorVotingPowersAt',
+    inputs: [
+      { name: 'operator', type: 'address', internalType: 'address' },
+      { name: 'extraData', type: 'bytes', internalType: 'bytes' },
+      { name: 'timestamp', type: 'uint48', internalType: 'uint48' },
+    ],
+    outputs: [
+      {
+        name: '',
+        type: 'tuple[]',
+        internalType: 'struct IVotingPowerProvider.VaultValue[]',
+        components: [
+          { name: 'vault', type: 'address', internalType: 'address' },
+          { name: 'value', type: 'uint256', internalType: 'uint256' },
+        ],
+      },
+    ],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
     name: 'getVotingPowersAt',
     inputs: [
       { name: 'extraData', type: 'bytes[]', internalType: 'bytes[]' },
@@ -284,6 +312,13 @@ export const VOTING_POWER_PROVIDER_ABI = [
 export const KEY_REGISTRY_ABI = [
   {
     type: 'function',
+    name: 'getKeysOperatorsAt',
+    inputs: [{ name: 'timestamp', type: 'uint48', internalType: 'uint48' }],
+    outputs: [{ name: '', type: 'address[]', internalType: 'address[]' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
     name: 'getKeysAt',
     inputs: [{ name: 'timestamp', type: 'uint48', internalType: 'uint48' }],
     outputs: [
@@ -302,6 +337,26 @@ export const KEY_REGISTRY_ABI = [
               { name: 'payload', type: 'bytes', internalType: 'bytes' },
             ],
           },
+        ],
+      },
+    ],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'getKeysAt',
+    inputs: [
+      { name: 'operator', type: 'address', internalType: 'address' },
+      { name: 'timestamp', type: 'uint48', internalType: 'uint48' },
+    ],
+    outputs: [
+      {
+        name: '',
+        type: 'tuple[]',
+        internalType: 'struct IKeyRegistry.Key[]',
+        components: [
+          { name: 'tag', type: 'uint8', internalType: 'uint8' },
+          { name: 'payload', type: 'bytes', internalType: 'bytes' },
         ],
       },
     ],

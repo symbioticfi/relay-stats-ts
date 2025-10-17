@@ -74,6 +74,7 @@ export interface ValidatorSet {
   totalVotingPower: bigint;
   status: 'committed' | 'pending' | 'missing';
   integrity: 'valid' | 'invalid';
+  extraData: ValSetExtraData[];
 }
 
 export interface ValidatorSetHeader {
@@ -96,14 +97,32 @@ export type ValSetExtraData = AggregatorExtraDataEntry;
 
 export type ValSetEventKind = 'genesis' | 'commit';
 
-export interface ValSetLogicEvent {
+export interface ValSetLogEvent {
   kind: ValSetEventKind;
   header: ValidatorSetHeader;
   extraData: ValSetExtraData[];
   blockNumber: bigint | null;
-  blockHash: Hex | null;
+  blockTimestamp: number | null;
   transactionHash: Hex | null;
-  logIndex: number | null;
+}
+
+export interface SettlementValSetStatus {
+  settlement: CrossChainAddress;
+  committed: boolean;
+  headerHash: Hex | null;
+  lastCommittedEpoch: number | null;
+}
+
+export interface SettlementValSetLog {
+  settlement: CrossChainAddress;
+  committed: boolean;
+  event: ValSetLogEvent | null;
+}
+
+export interface ValSetStatus {
+  status: 'committed' | 'pending' | 'missing';
+  integrity: 'valid' | 'invalid';
+  settlements: SettlementValSetStatus[];
 }
 
 export interface OperatorVotingPower {
@@ -137,14 +156,26 @@ export interface NetworkData {
   eip712Data: Eip712Domain;
 }
 
+export interface EpochData {
+  epoch: number;
+  finalized: boolean;
+  epochStart: number;
+  config: NetworkConfig;
+  validatorSet: ValidatorSet;
+  networkData?: NetworkData;
+  settlementStatuses?: SettlementValSetStatus[];
+  valSetEvents?: SettlementValSetLog[];
+  aggregatorsExtraData?: AggregatorExtraDataEntry[];
+}
+
 export interface CacheInterface {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  get(key: string): Promise<any | null>;
+  get(epoch: number, key: string): Promise<any | null>;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  set(key: string, value: any): Promise<void>;
+  set(epoch: number, key: string, value: any): Promise<void>;
 
-  delete(key: string): Promise<void>;
+  delete(epoch: number, key: string): Promise<void>;
 
-  clear(): Promise<void>;
+  clear(epoch: number): Promise<void>;
 }

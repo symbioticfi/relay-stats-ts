@@ -2,6 +2,11 @@ export const VALSET_VERSION = 1;
 export const SSZ_MAX_VALIDATORS = 1048576;
 export const SSZ_MAX_VAULTS = 1024;
 
+export const MULTICALL3_ADDRESS = '0xcA11bde05977b3631167028862bE2a173976CA11';
+export const MULTICALL_TARGET_GAS = 50_000_000n;
+export const MULTICALL_VOTING_CALL_GAS = 130_000n;
+export const MULTICALL_KEYS_CALL_GAS = 95_000n;
+
 export const AGGREGATOR_MODE = {
   SIMPLE: 'simple',
   ZK: 'zk',

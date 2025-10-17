@@ -1,19 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import {
-  createPublicClient,
-  http,
-  PublicClient,
-  Address,
-  Hex,
-  getContract,
-  encodeAbiParameters,
-  keccak256,
-} from 'viem';
+import { createPublicClient, http, PublicClient, Address, Hex, getContract } from 'viem';
 import {
   CrossChainAddress,
   NetworkConfig,
   ValidatorSet,
-  Validator,
   OperatorVotingPower,
   OperatorWithKeys,
   CacheInterface,
@@ -21,41 +11,70 @@ import {
   NetworkData,
   Eip712Domain,
   AggregatorExtraDataEntry,
-  ValSetExtraData,
-  ValSetLogicEvent,
-  ValSetEventKind,
+  EpochData,
+  ValSetStatus,
+  ValSetLogEvent,
+  SettlementValSetStatus,
+  SettlementValSetLog,
 } from './types.js';
-import { sszTreeRoot } from './ssz.js';
 // bytesToHex retained in public API exports; not used internally here
 import { buildSimpleExtraData, buildZkExtraData } from './extra_data.js';
 import {
   VALSET_VERSION,
-  SSZ_MAX_VALIDATORS,
-  SSZ_MAX_VAULTS,
   AGGREGATOR_MODE,
   AggregatorMode,
+  MULTICALL3_ADDRESS,
+  MULTICALL_TARGET_GAS,
+  MULTICALL_VOTING_CALL_GAS,
+  MULTICALL_KEYS_CALL_GAS,
 } from './constants.js';
+import { VALSET_DRIVER_ABI, SETTLEMENT_ABI, VOTING_POWER_PROVIDER_ABI, KEY_REGISTRY_ABI } from './abi.js';
+import { blockTagFromFinality, type BlockTagPreference } from './utils.js';
 import {
-  VALSET_DRIVER_ABI,
-  SETTLEMENT_ABI,
-  VOTING_POWER_PROVIDER_ABI,
-  KEY_REGISTRY_ABI,
-} from './abi.js';
+  calculateQuorumThreshold,
+  composeValidators,
+  createValidatorSetHeader,
+  encodeValidatorSetHeader,
+  hashValidatorSet,
+  hashValidatorSetHeader,
+  totalActiveVotingPower,
+} from './validator_set.js';
+import {
+  determineValSetStatus,
+  selectDefaultSettlement,
+  getOrCreateValSetEventsState,
+  ValSetEventsState,
+  retrieveValSetEvent as fetchValSetLogEvent,
+} from './valset_events.js';
 
 const EPOCH_EVENT_BLOCK_BUFFER = 16n;
 
-// Map a boolean preference to a BlockTag for viem reads
-function toBlockTag(finalized: boolean): 'finalized' | 'latest' {
-  return finalized ? 'finalized' : 'latest';
-}
+type DriverReadMethod =
+  | 'getCurrentEpoch'
+  | 'getCurrentEpochDuration'
+  | 'getCurrentEpochStart'
+  | 'getNextEpoch'
+  | 'getNextEpochDuration'
+  | 'getNextEpochStart'
+  | 'getEpochStart'
+  | 'getEpochDuration'
+  | 'getEpochIndex';
 
-type BlockTagPreference = ReturnType<typeof toBlockTag>;
+type DriverReadArgsMap = {
+  getCurrentEpoch: [];
+  getCurrentEpochDuration: [];
+  getCurrentEpochStart: [];
+  getNextEpoch: [];
+  getNextEpochDuration: [];
+  getNextEpochStart: [];
+  getEpochStart: [number];
+  getEpochDuration: [number];
+  getEpochIndex: [number];
+};
 
-type ValSetEventsState = {
-  settlement: CrossChainAddress;
-  blockTag: BlockTagPreference;
-  map: Map<number, ValSetLogicEvent>;
-  syncedToBlock: bigint | null;
+type CachedNetworkConfigEntry = {
+  config: NetworkConfig;
+  epochStart: number;
 };
 
 export interface ValidatorSetDeriverConfig {
@@ -66,20 +85,19 @@ export interface ValidatorSetDeriverConfig {
 }
 
 export class ValidatorSetDeriver {
-  private clients: Map<number, PublicClient> = new Map();
-  private driverAddress: CrossChainAddress;
-  private cache: CacheInterface | null;
-  private maxSavedEpochs: number;
-  private initializedPromise: Promise<void>;
-  private rpcUrls: string[];
-  private valsetEventsState: Map<string, ValSetEventsState>;
+  private readonly clients = new Map<number, PublicClient>();
+  private readonly driverAddress: CrossChainAddress;
+  private readonly cache: CacheInterface | null;
+  private readonly maxSavedEpochs: number;
+  private readonly initializedPromise: Promise<void>;
+  private readonly rpcUrls: readonly string[];
+  private readonly valsetEventsState = new Map<string, ValSetEventsState>();
 
   constructor(config: ValidatorSetDeriverConfig) {
     this.driverAddress = config.driverAddress;
     this.cache = config.cache === undefined ? null : config.cache;
     this.maxSavedEpochs = config.maxSavedEpochs || 100;
-    this.rpcUrls = config.rpcUrls;
-    this.valsetEventsState = new Map();
+    this.rpcUrls = Object.freeze([...config.rpcUrls]);
     this.initializedPromise = this.initializeClients();
   }
 
@@ -94,13 +112,42 @@ export class ValidatorSetDeriver {
   ): Promise<NetworkData> {
     await this.ensureInitialized();
 
-    const driver = this.getDriverContract();
+    const blockTag = blockTagFromFinality(finalized);
+    let networkAddress: Address;
+    let subnetwork: Hex;
 
-    // Read network address and subnetwork id from the driver
-    const [networkAddress, subnetwork] = await Promise.all([
-      driver.read.NETWORK({ blockTag: toBlockTag(finalized) }),
-      driver.read.SUBNETWORK({ blockTag: toBlockTag(finalized) }),
-    ]);
+    const driverClient = this.getClient(this.driverAddress.chainId);
+    if (await this.multicallExists(this.driverAddress.chainId, blockTag)) {
+      const results = await driverClient.multicall({
+        allowFailure: false,
+        blockTag,
+        multicallAddress: MULTICALL3_ADDRESS as Address,
+        contracts: [
+          {
+            address: this.driverAddress.address,
+            abi: VALSET_DRIVER_ABI,
+            functionName: 'NETWORK',
+          },
+          {
+            address: this.driverAddress.address,
+            abi: VALSET_DRIVER_ABI,
+            functionName: 'SUBNETWORK',
+          },
+        ],
+      });
+
+      networkAddress = results[0] as Address;
+      subnetwork = results[1] as Hex;
+    } else {
+      const driver = this.getDriverContract();
+      const values = await Promise.all([
+        driver.read.NETWORK({ blockTag }),
+        driver.read.SUBNETWORK({ blockTag }),
+      ]);
+
+      networkAddress = values[0] as Address;
+      subnetwork = values[1] as Hex;
+    }
 
     // Resolve settlement: use provided or first from config
     let targetSettlement: CrossChainAddress | undefined = settlement;
@@ -120,9 +167,7 @@ export class ValidatorSetDeriver {
       client: settlementClient,
     });
 
-    const domainTuple = await settlementContract.read.eip712Domain({
-      blockTag: toBlockTag(finalized),
-    });
+    const domainTuple = await settlementContract.read.eip712Domain({ blockTag });
 
     const [fields, name, version, chainId, verifyingContract, salt, extensions] =
       domainTuple as readonly [Hex, string, string, bigint, Address, Hex, readonly bigint[]];
@@ -160,8 +205,122 @@ export class ValidatorSetDeriver {
     // If keyTags not provided, use requiredKeyTags from network config
     const config = await this.getNetworkConfig(vset.epoch, finalized);
     const tags = keyTags && keyTags.length > 0 ? keyTags : config.requiredKeyTags;
-    if (mode === AGGREGATOR_MODE.SIMPLE) return buildSimpleExtraData(vset, tags);
-    return await buildZkExtraData(vset, tags);
+    return this.loadAggregatorsExtraData({
+      mode,
+      tags,
+      validatorSet: vset,
+      finalized,
+    });
+  }
+
+  public async getEpochData(options?: {
+    epoch?: number;
+    finalized?: boolean;
+    includeNetworkData?: boolean;
+    includeValSetEvent?: boolean;
+    settlement?: CrossChainAddress;
+    aggregatorKeyTags?: number[];
+  }): Promise<EpochData> {
+    await this.ensureInitialized();
+
+    const finalized = options?.finalized ?? true;
+    const { targetEpoch } = await this.resolveEpoch(options?.epoch, finalized);
+    const { config, epochStart } = await this.loadNetworkConfigData({ targetEpoch, finalized });
+
+    const useCache = finalized;
+    const cacheKey = 'valset';
+    let validatorSet: ValidatorSet | null = null;
+    if (useCache) {
+      const cached = await this.getFromCache('valset', targetEpoch, cacheKey);
+      if (cached) {
+        validatorSet = cached as ValidatorSet;
+      }
+    }
+    if (!validatorSet) {
+      validatorSet = await this.buildValidatorSet({
+        targetEpoch,
+        finalized,
+        epochStart,
+        config,
+        useCache,
+      });
+    }
+
+    let settlementStatuses: SettlementValSetStatus[] = [];
+    let valsetStatusData: ValSetStatus | null = null;
+    if (config.settlements.length > 0) {
+      valsetStatusData = await this.getValsetStatus(
+        Array.from(config.settlements),
+        targetEpoch,
+        finalized,
+      );
+      settlementStatuses = valsetStatusData.settlements;
+    }
+
+    const includeNetworkData = options?.includeNetworkData ?? false;
+    const includeValSetEvent = options?.includeValSetEvent ?? false;
+
+    const settlement =
+      options?.settlement ?? (config.settlements.length > 0 ? config.settlements[0] : undefined);
+
+    let networkData: NetworkData | undefined;
+    if (includeNetworkData) {
+      networkData = await this.getNetworkData(settlement, finalized);
+    }
+
+    let aggregatorsExtraData: AggregatorExtraDataEntry[] | undefined;
+    const tags =
+      options?.aggregatorKeyTags && options.aggregatorKeyTags.length > 0
+        ? options.aggregatorKeyTags
+        : config.requiredKeyTags;
+    const mode = config.verificationType === 1 ? AGGREGATOR_MODE.ZK : AGGREGATOR_MODE.SIMPLE;
+    aggregatorsExtraData = await this.loadAggregatorsExtraData({
+      mode,
+      tags,
+      validatorSet,
+      finalized,
+    });
+
+    let valSetEvents: SettlementValSetLog[] | undefined;
+    if (includeValSetEvent) {
+      if (settlementStatuses.length === 0) {
+        valSetEvents = [];
+      } else {
+        const events: SettlementValSetLog[] = [];
+        for (const detail of settlementStatuses) {
+          let event: ValSetLogEvent | null = null;
+          if (detail.committed) {
+            event = await this.retrieveValSetEvent(
+              {
+                epoch: targetEpoch,
+                settlement: detail.settlement,
+                finalized,
+              },
+              { overall: valsetStatusData, detail },
+            );
+          }
+          events.push({
+            settlement: detail.settlement,
+            committed: detail.committed,
+            event,
+          });
+        }
+
+        valSetEvents = events;
+      }
+    }
+
+    return {
+      epoch: targetEpoch,
+      finalized,
+      epochStart,
+      config,
+      validatorSet,
+      networkData,
+      settlementStatuses,
+      valSetEvents,
+      aggregatorsExtraData,
+    };
   }
 
   /**
@@ -199,19 +358,14 @@ export class ValidatorSetDeriver {
 
   private async validateRequiredChains(): Promise<void> {
     try {
-      const driver = this.getDriverContract();
       const currentEpoch = await this.getCurrentEpoch(true);
-      const timestamp = await this.getEpochStart(currentEpoch, true);
-      const config: any = await driver.read.getConfigAt([Number(timestamp)], {
-        blockTag: toBlockTag(true),
-      });
+      const config = await this.getNetworkConfig(currentEpoch, true);
 
       const requiredChainIds = new Set<number>();
       requiredChainIds.add(this.driverAddress.chainId);
-
-      config.votingPowerProviders.forEach((p: any) => requiredChainIds.add(Number(p.chainId)));
+      config.votingPowerProviders.forEach((p) => requiredChainIds.add(Number(p.chainId)));
       requiredChainIds.add(Number(config.keysProvider.chainId));
-      config.settlements.forEach((s: any) => requiredChainIds.add(Number(s.chainId)));
+      config.settlements.forEach((s) => requiredChainIds.add(Number(s.chainId)));
 
       const missingChains: number[] = [];
       for (const chainId of requiredChainIds) {
@@ -238,155 +392,42 @@ export class ValidatorSetDeriver {
     }
   }
 
-  private async ensureInitialized(): Promise<void> {
-    await this.initializedPromise;
-  }
-
-  private getClient(chainId: number): PublicClient {
-    const client = this.clients.get(chainId);
-    if (!client) {
-      throw new Error(`No client for chain ID ${chainId}`);
-    }
-    return client;
-  }
-
-  private getDriverContract() {
-    const client = this.getClient(this.driverAddress.chainId);
-    return getContract({
-      address: this.driverAddress.address,
-      abi: VALSET_DRIVER_ABI,
-      client,
-    });
-  }
-
-  // withPreferredBlockTag removed; use explicit { blockTag: toBlockTag(...) }
-
-  private async getFromCache(key: string): Promise<any | null> {
-    if (!this.cache) return null;
-    try {
-      return await this.cache.get(key);
-    } catch {
-      return null;
-    }
-  }
-
-  private async setToCache(key: string, value: any): Promise<void> {
-    if (!this.cache) return;
-    try {
-      await this.cache.set(key, value);
-    } catch {
-      // Ignore cache errors
-    }
-  }
-
-  async getCurrentEpoch(finalized: boolean = true): Promise<number> {
-    await this.ensureInitialized();
-    const driver = this.getDriverContract();
-    const epoch = await driver.read.getCurrentEpoch({
-      blockTag: toBlockTag(finalized),
-    });
-    return Number(epoch);
-  }
-
-  async getCurrentEpochDuration(finalized: boolean = true): Promise<number> {
-    await this.ensureInitialized();
-    const driver = this.getDriverContract();
-    const duration = await driver.read.getCurrentEpochDuration({
-      blockTag: toBlockTag(finalized),
-    });
-    return Number(duration);
-  }
-
-  async getCurrentEpochStart(finalized: boolean = true): Promise<number> {
-    await this.ensureInitialized();
-    const driver = this.getDriverContract();
-    const start = await driver.read.getCurrentEpochStart({
-      blockTag: toBlockTag(finalized),
-    });
-    return Number(start);
-  }
-
-  async getNextEpoch(finalized: boolean = true): Promise<number> {
-    await this.ensureInitialized();
-    const driver = this.getDriverContract();
-    const value = await driver.read.getNextEpoch({
-      blockTag: toBlockTag(finalized),
-    });
-    return Number(value);
-  }
-
-  async getNextEpochDuration(finalized: boolean = true): Promise<number> {
-    await this.ensureInitialized();
-    const driver = this.getDriverContract();
-    const duration = await driver.read.getNextEpochDuration({
-      blockTag: toBlockTag(finalized),
-    });
-    return Number(duration);
-  }
-
-  async getNextEpochStart(finalized: boolean = true): Promise<number> {
-    await this.ensureInitialized();
-    const driver = this.getDriverContract();
-    const start = await driver.read.getNextEpochStart({
-      blockTag: toBlockTag(finalized),
-    });
-    return Number(start);
-  }
-
-  async getEpochStart(epoch: number, finalized: boolean = true): Promise<number> {
-    await this.ensureInitialized();
-    const driver = this.getDriverContract();
-    const start = await driver.read.getEpochStart([Number(epoch)], {
-      blockTag: toBlockTag(finalized),
-    });
-    return Number(start);
-  }
-
-  async getEpochDuration(epoch: number, finalized: boolean = true): Promise<number> {
-    await this.ensureInitialized();
-    const driver = this.getDriverContract();
-    const duration = await driver.read.getEpochDuration([Number(epoch)], {
-      blockTag: toBlockTag(finalized),
-    });
-    return Number(duration);
-  }
-
-  async getEpochIndex(timestamp: number, finalized: boolean = true): Promise<number> {
-    await this.ensureInitialized();
-    const driver = this.getDriverContract();
-    const index = await driver.read.getEpochIndex([Number(timestamp)], {
-      blockTag: toBlockTag(finalized),
-    });
-    return Number(index);
-  }
-
-  async getNetworkConfig(epoch?: number, finalized: boolean = true): Promise<NetworkConfig> {
-    await this.ensureInitialized();
-
+  private async resolveEpoch(
+    epoch: number | undefined,
+    finalized: boolean,
+  ): Promise<{ currentEpoch: number; targetEpoch: number }> {
     const currentEpoch = await this.getCurrentEpoch(finalized);
     const targetEpoch = epoch ?? currentEpoch;
-
     if (targetEpoch > currentEpoch) {
       throw new Error(
         `Requested epoch ${targetEpoch} is not yet available on-chain (latest is ${currentEpoch}).`,
       );
     }
+    return { currentEpoch, targetEpoch };
+  }
 
-    const useCache = finalized;
-    const cacheKey = `config_${targetEpoch}`;
-    if (useCache) {
-      const cached = await this.getFromCache(cacheKey);
-      if (cached) return cached;
-    }
+  private isCachedNetworkConfigEntry(value: unknown): value is CachedNetworkConfigEntry {
+    if (!value || typeof value !== 'object' || value === null) return false;
+    const entry = value as CachedNetworkConfigEntry & { epochStart?: unknown };
+    return (
+      typeof entry.epochStart === 'number' &&
+      entry.config !== undefined &&
+      typeof (entry.config as NetworkConfig).requiredHeaderKeyTag === 'number'
+    );
+  }
 
-    const driver = this.getDriverContract();
+  private isNetworkConfigStructure(value: unknown): value is NetworkConfig {
+    if (!value || typeof value !== 'object' || value === null) return false;
+    const candidate = value as NetworkConfig & { keysProvider?: unknown; settlements?: unknown };
+    return (
+      typeof candidate.keysProvider === 'object' &&
+      candidate.keysProvider !== null &&
+      Array.isArray(candidate.settlements)
+    );
+  }
 
-    const timestamp = await this.getEpochStart(targetEpoch, finalized);
-    const config: any = await driver.read.getConfigAt([Number(timestamp)], {
-      blockTag: toBlockTag(finalized),
-    });
-
-    const result: NetworkConfig = {
+  private mapDriverConfig(config: any): NetworkConfig {
+    return {
       votingPowerProviders: config.votingPowerProviders.map((p: any) => ({
         chainId: Number(p.chainId),
         address: p.addr as Address,
@@ -412,82 +453,190 @@ export class ValidatorSetDeriver {
       numCommitters: Number(config.numCommitters),
       numAggregators: Number(config.numAggregators),
     };
+  }
+
+  private async loadNetworkConfigData(params: {
+    targetEpoch: number;
+    finalized: boolean;
+  }): Promise<CachedNetworkConfigEntry> {
+    const { targetEpoch, finalized } = params;
+    const useCache = finalized;
+    const cacheKey = 'config';
 
     if (useCache) {
-      await this.setToCache(cacheKey, result);
-      await this.cleanupOldCache(targetEpoch);
+      const cached = await this.getFromCache('config', targetEpoch, cacheKey);
+      if (cached) {
+        if (this.isCachedNetworkConfigEntry(cached)) {
+          return cached;
+        }
+        if (this.isNetworkConfigStructure(cached)) {
+          const epochStart = await this.getEpochStart(targetEpoch, finalized);
+          const entry: CachedNetworkConfigEntry = {
+            config: cached,
+            epochStart,
+          };
+          await this.setToCache('config', targetEpoch, cacheKey, entry);
+          return entry;
+        }
+      }
+    }
+
+    const blockTag = blockTagFromFinality(finalized);
+    const epochStart = await this.getEpochStart(targetEpoch, finalized);
+    const driver = this.getDriverContract();
+    const rawConfig = await driver.read.getConfigAt([Number(epochStart)], {
+      blockTag,
+    });
+
+    const config = this.mapDriverConfig(rawConfig);
+    const entry: CachedNetworkConfigEntry = {
+      config,
+      epochStart,
+    };
+
+    if (useCache) {
+      await this.setToCache('config', targetEpoch, cacheKey, entry);
+    }
+
+    return entry;
+  }
+
+  private settlementCacheKey(settlement: CrossChainAddress): string {
+    return `${settlement.chainId}_${settlement.address.toLowerCase()}`;
+  }
+
+  private settlementsCacheKey(settlements: readonly CrossChainAddress[]): string {
+    return settlements.map((s) => this.settlementCacheKey(s)).sort().join('|');
+  }
+
+  private async loadValSetStatus(params: {
+    settlements: readonly CrossChainAddress[];
+    epoch: number;
+    finalized: boolean;
+  }): Promise<ValSetStatus> {
+    const { settlements, epoch, finalized } = params;
+    const useCache = finalized;
+    const key = this.settlementsCacheKey(settlements);
+
+    if (useCache) {
+      const cached = await this.getFromCache('valset_status', epoch, key);
+      if (cached) {
+        const value = cached as ValSetStatus;
+        if (Array.isArray(value.settlements)) {
+          return value;
+        }
+      }
+    }
+
+    const status = await determineValSetStatus(
+      (chainId) => this.getClient(chainId),
+      settlements,
+      epoch,
+      finalized,
+    );
+
+    if (useCache) {
+      await this.setToCache('valset_status', epoch, key, status);
+    }
+
+    return status;
+  }
+
+  private async loadAggregatorsExtraData(params: {
+    mode: AggregatorMode;
+    tags: readonly number[];
+    validatorSet: ValidatorSet;
+    finalized: boolean;
+  }): Promise<AggregatorExtraDataEntry[]> {
+    const { mode, tags, validatorSet, finalized } = params;
+    const sortedTags = [...tags].sort((a, b) => a - b);
+    const cacheKey = `${mode}_${sortedTags.join(',')}`;
+    const useCache = finalized;
+
+    if (useCache) {
+      const cached = await this.getFromCache('aggregator_extra', validatorSet.epoch, cacheKey);
+      if (cached) return cached as AggregatorExtraDataEntry[];
+    }
+
+    const result =
+      mode === AGGREGATOR_MODE.SIMPLE
+        ? buildSimpleExtraData(validatorSet, sortedTags)
+        : await buildZkExtraData(validatorSet, sortedTags);
+
+    if (useCache) {
+      await this.setToCache('aggregator_extra', validatorSet.epoch, cacheKey, result);
     }
 
     return result;
   }
 
-  async getValidatorSet(epoch?: number, finalized: boolean = true): Promise<ValidatorSet> {
-    await this.ensureInitialized();
+  private async buildValidatorSet(params: {
+    targetEpoch: number;
+    finalized: boolean;
+    epochStart: number;
+    config: NetworkConfig;
+    useCache: boolean;
+  }): Promise<ValidatorSet> {
+    const { targetEpoch, finalized, epochStart, config, useCache } = params;
+    const cacheKey = 'valset';
 
-    const currentEpoch = await this.getCurrentEpoch(finalized);
-    const targetEpoch = epoch ?? currentEpoch;
+    const timestampNumber = Number(epochStart);
 
-    if (targetEpoch > currentEpoch) {
-      throw new Error(
-        `Requested epoch ${targetEpoch} is not yet available on-chain (latest is ${currentEpoch}).`,
-      );
-    }
-
-    const useCache2 = finalized;
-    const cacheKey = `valset_${targetEpoch}`;
-    if (useCache2) {
-      const cached = await this.getFromCache(cacheKey);
-      if (cached) return cached;
-    }
-
-    const config = await this.getNetworkConfig(targetEpoch, finalized);
-
-    const timestamp = await this.getEpochStart(targetEpoch, finalized);
-
-    // Get voting powers from all providers
     const allVotingPowers: { chainId: number; votingPowers: OperatorVotingPower[] }[] = [];
     for (const provider of config.votingPowerProviders) {
-      const votingPowers = await this.getVotingPowers(provider, Number(timestamp), finalized);
+      const votingPowers = await this.getVotingPowers(provider, timestampNumber, finalized);
       allVotingPowers.push({
         chainId: provider.chainId,
         votingPowers,
       });
     }
 
-    // Get keys
-    const keys = await this.getKeys(config.keysProvider, Number(timestamp), finalized);
+    const keys = await this.getKeys(config.keysProvider, timestampNumber, finalized);
 
-    // Form validators
-    const validators = this.formValidators(config, allVotingPowers, keys);
-
-    // Calculate total voting power
+    const validators = composeValidators(config, allVotingPowers, keys);
     const totalVotingPower = validators
-      .filter((v) => v.isActive)
-      .reduce((sum, v) => sum + v.votingPower, 0n);
+      .filter((validator) => validator.isActive)
+      .reduce((sum, validator) => sum + validator.votingPower, 0n);
+    const quorumThreshold = calculateQuorumThreshold(config, totalVotingPower);
 
-    // Calculate quorum threshold
-    const quorumThreshold = this.calcQuorumThreshold(config, totalVotingPower);
+    const { status, integrity } = await this.loadValSetStatus({
+      settlements: config.settlements,
+      epoch: targetEpoch,
+      finalized,
+    });
 
-    // Get settlement status
-    const { status, integrity } = await this.getValSetStatus(targetEpoch, finalized);
+    const sortedRequiredTags = [...config.requiredKeyTags].sort((a, b) => a - b);
 
-    const valset: ValidatorSet = {
+    const baseValset: ValidatorSet = {
       version: VALSET_VERSION,
       requiredKeyTag: config.requiredHeaderKeyTag,
       epoch: targetEpoch,
-      captureTimestamp: Number(timestamp),
+      captureTimestamp: timestampNumber,
       quorumThreshold,
       validators,
       totalVotingPower,
-      status: status,
-      integrity: integrity,
+      status,
+      integrity,
+      extraData: [],
     };
+
+    const simpleExtra = buildSimpleExtraData(baseValset, sortedRequiredTags);
+    const zkExtra = await buildZkExtraData(baseValset, sortedRequiredTags);
+
+    const combinedEntries = [...simpleExtra, ...zkExtra];
+    const deduped = new Map<string, AggregatorExtraDataEntry>();
+    for (const entry of combinedEntries) {
+      deduped.set(entry.key.toLowerCase(), entry);
+    }
+    const extraData = Array.from(deduped.values()).sort((left, right) =>
+      left.key.toLowerCase().localeCompare(right.key.toLowerCase()),
+    );
 
     const result: ValidatorSet = {
-      ...valset,
+      ...baseValset,
+      extraData,
     };
 
-    // Raise error if integrity status is invalid
     if (result.integrity === 'invalid') {
       throw new Error(
         `Settlement integrity check failed for epoch ${targetEpoch}. ` +
@@ -495,12 +644,237 @@ export class ValidatorSetDeriver {
       );
     }
 
-    if (useCache2) {
-      await this.setToCache(cacheKey, result);
-      await this.cleanupOldCache(targetEpoch);
+    if (useCache) {
+      await this.setToCache('valset', targetEpoch, cacheKey, result);
+      const tagsKey = sortedRequiredTags.join(',');
+      await this.setToCache(
+        'aggregator_extra',
+        targetEpoch,
+        `${AGGREGATOR_MODE.SIMPLE}_${tagsKey}`,
+        simpleExtra,
+      );
+      await this.setToCache(
+        'aggregator_extra',
+        targetEpoch,
+        `${AGGREGATOR_MODE.ZK}_${tagsKey}`,
+        zkExtra,
+      );
     }
 
     return result;
+  }
+
+  private async ensureInitialized(): Promise<void> {
+    await this.initializedPromise;
+  }
+
+  private getClient(chainId: number): PublicClient {
+    const client = this.clients.get(chainId);
+    if (!client) {
+      throw new Error(`No client for chain ID ${chainId}`);
+    }
+    return client;
+  }
+
+  private async multicallExists(chainId: number, blockTag: BlockTagPreference): Promise<boolean> {
+    const client = this.getClient(chainId);
+    const tagsToTry: BlockTagPreference[] =
+      blockTag === 'finalized' ? [blockTag, 'latest'] : [blockTag];
+
+    for (const tag of tagsToTry) {
+      try {
+        const bytecode = await client.getBytecode({
+          address: MULTICALL3_ADDRESS as Address,
+          blockTag: tag,
+        });
+        if (bytecode && bytecode !== '0x') {
+          return true;
+        }
+        if (bytecode !== null) {
+          return false;
+        }
+      } catch {
+        // If the network does not support the requested finality, try the next tag.
+        continue;
+      }
+    }
+
+    return false;
+  }
+
+  private async executeChunkedMulticall<T>({
+    client,
+    requests,
+    blockTag,
+  }: {
+    client: PublicClient;
+    requests: {
+      address: Address;
+      abi: typeof VOTING_POWER_PROVIDER_ABI | typeof KEY_REGISTRY_ABI;
+      functionName: string;
+      args: readonly unknown[];
+      estimatedGas: bigint;
+    }[];
+    blockTag: BlockTagPreference;
+  }): Promise<T[]> {
+    if (requests.length === 0) return [];
+
+    const chunks: (typeof requests)[] = [];
+    let currentChunk: typeof requests = [];
+    let currentGas: bigint = 0n;
+
+    for (const request of requests) {
+      const gasEstimate = request.estimatedGas ?? 0n;
+
+      if (currentChunk.length > 0 && currentGas + gasEstimate > MULTICALL_TARGET_GAS) {
+        chunks.push(currentChunk);
+        currentChunk = [];
+        currentGas = 0n;
+      }
+
+      currentChunk.push(request);
+      currentGas += gasEstimate;
+    }
+
+    if (currentChunk.length > 0) {
+      chunks.push(currentChunk);
+    }
+
+    const results: T[] = [];
+
+    for (const chunk of chunks) {
+      const rawResult = await client.multicall({
+        allowFailure: false,
+        blockTag,
+        multicallAddress: MULTICALL3_ADDRESS as Address,
+        contracts: chunk.map((item) => ({
+          address: item.address,
+          abi: item.abi,
+          functionName: item.functionName as 'getOperatorVotingPowersAt' | 'getKeysAt',
+          args: item.args,
+        })),
+      });
+
+      const chunkResult = rawResult as unknown as T[];
+      results.push(...chunkResult);
+    }
+
+    return results;
+  }
+
+  private getDriverContract() {
+    const client = this.getClient(this.driverAddress.chainId);
+    return getContract({
+      address: this.driverAddress.address,
+      abi: VALSET_DRIVER_ABI,
+      client,
+    });
+  }
+
+  private async readDriverNumber<M extends DriverReadMethod>(
+    method: M,
+    finalized: boolean,
+    args?: DriverReadArgsMap[M],
+  ): Promise<number> {
+    await this.ensureInitialized();
+    const driver = this.getDriverContract();
+    const blockTag = blockTagFromFinality(finalized);
+    const reader = (
+      driver.read as unknown as Record<
+        DriverReadMethod,
+        (...params: any[]) => Promise<bigint | number>
+      >
+    )[method];
+    const result =
+      args && args.length > 0 ? await reader(args, { blockTag }) : await reader({ blockTag });
+    return Number(result);
+  }
+
+  // withPreferredBlockTag removed; use explicit { blockTag: blockTagFromFinality(...) }
+
+  private async getFromCache(namespace: string, epoch: number, key: string): Promise<any | null> {
+    if (!this.cache) return null;
+    try {
+      return await this.cache.get(epoch, key);
+    } catch {
+      return null;
+    }
+  }
+
+  private async setToCache(namespace: string, epoch: number, key: string, value: any): Promise<void> {
+    if (!this.cache) return;
+    try {
+      await this.cache.set(epoch, key, value);
+    } catch {
+      // Ignore cache errors
+    }
+  }
+
+  async getCurrentEpoch(finalized: boolean = true): Promise<number> {
+    return this.readDriverNumber('getCurrentEpoch', finalized);
+  }
+
+  async getCurrentEpochDuration(finalized: boolean = true): Promise<number> {
+    return this.readDriverNumber('getCurrentEpochDuration', finalized);
+  }
+
+  async getCurrentEpochStart(finalized: boolean = true): Promise<number> {
+    return this.readDriverNumber('getCurrentEpochStart', finalized);
+  }
+
+  async getNextEpoch(finalized: boolean = true): Promise<number> {
+    return this.readDriverNumber('getNextEpoch', finalized);
+  }
+
+  async getNextEpochDuration(finalized: boolean = true): Promise<number> {
+    return this.readDriverNumber('getNextEpochDuration', finalized);
+  }
+
+  async getNextEpochStart(finalized: boolean = true): Promise<number> {
+    return this.readDriverNumber('getNextEpochStart', finalized);
+  }
+
+  async getEpochStart(epoch: number, finalized: boolean = true): Promise<number> {
+    return this.readDriverNumber('getEpochStart', finalized, [Number(epoch)]);
+  }
+
+  async getEpochDuration(epoch: number, finalized: boolean = true): Promise<number> {
+    return this.readDriverNumber('getEpochDuration', finalized, [Number(epoch)]);
+  }
+
+  async getEpochIndex(timestamp: number, finalized: boolean = true): Promise<number> {
+    return this.readDriverNumber('getEpochIndex', finalized, [Number(timestamp)]);
+  }
+
+  async getNetworkConfig(epoch?: number, finalized: boolean = true): Promise<NetworkConfig> {
+    await this.ensureInitialized();
+
+    const { targetEpoch } = await this.resolveEpoch(epoch, finalized);
+    const { config } = await this.loadNetworkConfigData({ targetEpoch, finalized });
+    return config;
+  }
+
+  async getValidatorSet(epoch?: number, finalized: boolean = true): Promise<ValidatorSet> {
+    await this.ensureInitialized();
+
+    const { targetEpoch } = await this.resolveEpoch(epoch, finalized);
+
+    const useCache2 = finalized;
+    const cacheKey = 'valset';
+    if (useCache2) {
+      const cached = await this.getFromCache('valset', targetEpoch, cacheKey);
+      if (cached) return cached;
+    }
+
+    const { config, epochStart } = await this.loadNetworkConfigData({ targetEpoch, finalized });
+
+    return this.buildValidatorSet({
+      targetEpoch,
+      finalized,
+      epochStart,
+      config,
+      useCache: useCache2,
+    });
   }
 
   /**
@@ -517,67 +891,24 @@ export class ValidatorSetDeriver {
     return this.getNetworkConfig(undefined, true);
   }
 
-  // ================================
-  // ValidatorSetHeader helpers
-  // ================================
-
-  /** Sum voting power of active validators only */
-  public getTotalActiveVotingPower(v: ValidatorSet): bigint {
-    let total: bigint = 0n;
-    for (const validator of v.validators) {
-      if (validator.isActive) total += validator.votingPower;
-    }
-    return total;
+  public getTotalActiveVotingPower(validatorSet: ValidatorSet): bigint {
+    return totalActiveVotingPower(validatorSet);
   }
 
-  /** Construct ValidatorSetHeader from a ValidatorSet */
-  public getValidatorSetHeader(v: ValidatorSet): ValidatorSetHeader {
-    const sszMroot = sszTreeRoot(v);
-    return {
-      version: v.version,
-      requiredKeyTag: v.requiredKeyTag,
-      epoch: v.epoch,
-      captureTimestamp: v.captureTimestamp,
-      quorumThreshold: v.quorumThreshold,
-      totalVotingPower: this.getTotalActiveVotingPower(v),
-      validatorsSszMRoot: sszMroot,
-    };
+  public getValidatorSetHeader(validatorSet: ValidatorSet): ValidatorSetHeader {
+    return createValidatorSetHeader(validatorSet);
   }
 
-  /** ABI-encode a ValidatorSetHeader per Solidity signature */
-  public abiEncodeValidatorSetHeader(h: ValidatorSetHeader): Hex {
-    return encodeAbiParameters(
-      [
-        { name: 'version', type: 'uint8' },
-        { name: 'requiredKeyTag', type: 'uint8' },
-        { name: 'epoch', type: 'uint48' },
-        { name: 'captureTimestamp', type: 'uint48' },
-        { name: 'quorumThreshold', type: 'uint256' },
-        { name: 'totalVotingPower', type: 'uint256' },
-        { name: 'validatorsSszMRoot', type: 'bytes32' },
-      ],
-      [
-        h.version,
-        h.requiredKeyTag,
-        h.epoch,
-        h.captureTimestamp,
-        h.quorumThreshold,
-        h.totalVotingPower,
-        h.validatorsSszMRoot,
-      ],
-    ) as Hex;
+  public abiEncodeValidatorSetHeader(header: ValidatorSetHeader): Hex {
+    return encodeValidatorSetHeader(header);
   }
 
-  /** Keccak256 hash of the ABI-encoded header */
-  public hashValidatorSetHeader(h: ValidatorSetHeader): Hex {
-    const encoded = this.abiEncodeValidatorSetHeader(h);
-    return keccak256(encoded);
+  public hashValidatorSetHeader(header: ValidatorSetHeader): Hex {
+    return hashValidatorSetHeader(header);
   }
 
-  /** Convenience: Build header from set and return its hash */
-  public getValidatorSetHeaderHash(v: ValidatorSet): Hex {
-    const header = this.getValidatorSetHeader(v);
-    return this.hashValidatorSetHeader(header);
+  public getValidatorSetHeaderHash(validatorSet: ValidatorSet): Hex {
+    return hashValidatorSet(validatorSet);
   }
 
   private async getVotingPowers(
@@ -586,14 +917,57 @@ export class ValidatorSetDeriver {
     preferFinalized: boolean,
   ): Promise<OperatorVotingPower[]> {
     const client = this.getClient(provider.chainId);
+    const blockTag = blockTagFromFinality(preferFinalized);
+    const timestampBigInt = BigInt(timestamp);
+    const timestampNumber = Number(timestamp);
     const providerContract = getContract({
       address: provider.address,
       abi: VOTING_POWER_PROVIDER_ABI,
       client,
     });
 
-    const votingPowers = await providerContract.read.getVotingPowersAt([[], Number(timestamp)], {
-      blockTag: toBlockTag(preferFinalized),
+    if (await this.multicallExists(provider.chainId, blockTag)) {
+      const operators = await providerContract.read.getOperatorsAt([timestampNumber], {
+        blockTag,
+      });
+
+      if (operators.length === 0) return [];
+
+      const operatorList = Array.from(operators, (operator) => operator as Address);
+      const results = await this.executeChunkedMulticall<
+        readonly { vault: Address; value: bigint }[]
+      >({
+        client,
+        requests: operatorList.map((operator) => ({
+          address: provider.address,
+          abi: VOTING_POWER_PROVIDER_ABI,
+          functionName: 'getOperatorVotingPowersAt',
+          args: [operator, '0x' as Hex, timestampBigInt],
+          estimatedGas: MULTICALL_VOTING_CALL_GAS,
+        })),
+        blockTag,
+      });
+
+      if (results.length !== operatorList.length) {
+        throw new Error(
+          `Multicall result length mismatch for voting powers: expected ${operatorList.length}, got ${results.length}`,
+        );
+      }
+
+      return operatorList.map((operator, index) => {
+        const vaults = (results[index] ?? []) as readonly { vault: Address; value: bigint }[];
+        return {
+          operator,
+          vaults: Array.from(vaults, (v) => ({
+            vault: v.vault as Address,
+            votingPower: v.value,
+          })),
+        };
+      });
+    }
+
+    const votingPowers = await providerContract.read.getVotingPowersAt([[], timestampNumber], {
+      blockTag,
     });
 
     return votingPowers.map((vp: any) => ({
@@ -611,497 +985,94 @@ export class ValidatorSetDeriver {
     preferFinalized: boolean,
   ): Promise<OperatorWithKeys[]> {
     const client = this.getClient(provider.chainId);
+    const blockTag = blockTagFromFinality(preferFinalized);
+    const timestampNumber = Number(timestamp);
     const keyRegistry = getContract({
       address: provider.address,
       abi: KEY_REGISTRY_ABI,
       client,
     });
 
-    const keys = await keyRegistry.read.getKeysAt([Number(timestamp)], {
-      blockTag: toBlockTag(preferFinalized),
-    });
+    if (await this.multicallExists(provider.chainId, blockTag)) {
+      const operators = await keyRegistry.read.getKeysOperatorsAt([timestampNumber], {
+        blockTag,
+      });
 
-    return keys.map((k: any) => ({
-      operator: k.operator as Address,
-      keys: k.keys.map((key: any) => ({
-        tag: key.tag,
-        payload: key.payload as Hex,
+      if (operators.length === 0) return [];
+
+      const operatorList = Array.from(operators, (operator) => operator as Address);
+      const results = await this.executeChunkedMulticall<
+        readonly { tag: number | bigint; payload: Hex }[]
+      >({
+        client,
+        requests: operatorList.map((operator) => ({
+          address: provider.address,
+          abi: KEY_REGISTRY_ABI,
+          functionName: 'getKeysAt',
+          args: [operator, timestampNumber],
+          estimatedGas: MULTICALL_KEYS_CALL_GAS,
+        })),
+        blockTag,
+      });
+
+      if (results.length !== operatorList.length) {
+        throw new Error(
+          `Multicall result length mismatch for keys: expected ${operatorList.length}, got ${results.length}`,
+        );
+      }
+
+      return operatorList.map((operator, index) => {
+        const operatorKeys = (results[index] ?? []) as readonly {
+          tag: number | bigint;
+          payload: Hex;
+        }[];
+        return {
+          operator,
+          keys: Array.from(operatorKeys, (key) => ({
+            tag: typeof key.tag === 'bigint' ? Number(key.tag) : key.tag,
+            payload: key.payload as Hex,
+          })),
+        };
+      });
+    }
+
+    const keys = (await client.readContract({
+      address: provider.address,
+      abi: KEY_REGISTRY_ABI,
+      functionName: 'getKeysAt',
+      args: [timestampNumber] as const,
+      blockTag,
+    })) as readonly {
+      operator: Address;
+      keys: readonly { tag: number | bigint; payload: Hex }[];
+    }[];
+
+    return keys.map((k) => ({
+      operator: k.operator,
+      keys: Array.from(k.keys, (key) => ({
+        tag: typeof key.tag === 'bigint' ? Number(key.tag) : key.tag,
+        payload: key.payload,
       })),
     }));
-  }
-
-  private formValidators(
-    config: NetworkConfig,
-    votingPowers: { chainId: number; votingPowers: OperatorVotingPower[] }[],
-    keys: OperatorWithKeys[],
-  ): Validator[] {
-    const validatorsMap = new Map<string, Validator>();
-
-    // Process voting powers
-    for (const chainVp of votingPowers) {
-      for (const vp of chainVp.votingPowers) {
-        const operatorAddr = vp.operator.toLowerCase() as Address;
-
-        if (!validatorsMap.has(operatorAddr)) {
-          validatorsMap.set(operatorAddr, {
-            operator: vp.operator,
-            votingPower: 0n,
-            isActive: false,
-            keys: [],
-            vaults: [],
-          });
-        }
-
-        const validator = validatorsMap.get(operatorAddr)!;
-
-        for (const vault of vp.vaults) {
-          validator.votingPower = validator.votingPower + vault.votingPower;
-          validator.vaults.push({
-            vault: vault.vault,
-            votingPower: vault.votingPower,
-            chainId: chainVp.chainId,
-          });
-        }
-      }
-    }
-
-    // Limit vaults per validator to SSZ max
-    for (const validator of validatorsMap.values()) {
-      if (validator.vaults.length > SSZ_MAX_VAULTS) {
-        // Sort by voting power descending, then by address
-        validator.vaults.sort(
-          (
-            a: { votingPower: bigint; vault: Address },
-            b: { votingPower: bigint; vault: Address },
-          ) => {
-            const powerDiff: bigint = b.votingPower - a.votingPower;
-            if (powerDiff !== 0n) {
-              return powerDiff > 0n ? 1 : -1;
-            }
-            return a.vault.toLowerCase().localeCompare(b.vault.toLowerCase());
-          },
-        );
-        validator.vaults = validator.vaults.slice(0, SSZ_MAX_VAULTS);
-
-        // Recalculate total voting power
-        validator.votingPower = validator.vaults.reduce((sum, v) => sum + v.votingPower, 0n);
-      }
-
-      // Sort vaults by address for final output
-      validator.vaults.sort((a: { vault: Address }, b: { vault: Address }) =>
-        a.vault.toLowerCase().localeCompare(b.vault.toLowerCase()),
-      );
-    }
-
-    // Process keys
-    for (const rk of keys) {
-      const operatorAddr = rk.operator.toLowerCase() as Address;
-      const validator = validatorsMap.get(operatorAddr);
-
-      if (validator) {
-        validator.keys = rk.keys;
-      }
-    }
-
-    // Convert map to array and sort
-    let validators = Array.from(validatorsMap.values());
-
-    // Sort by voting power descending, then by operator address
-    validators.sort((a: Validator, b: Validator) => {
-      const powerDiff: bigint = b.votingPower - a.votingPower;
-      if (powerDiff !== 0n) {
-        return powerDiff > 0n ? 1 : -1;
-      }
-      return a.operator.toLowerCase().localeCompare(b.operator.toLowerCase());
-    });
-
-    // Limit validators to SSZ max
-    if (validators.length > SSZ_MAX_VALIDATORS) {
-      validators = validators.slice(0, SSZ_MAX_VALIDATORS);
-    }
-
-    // Mark validators as active
-    this.markValidatorsActive(config, validators);
-
-    // Sort by operator address for final output
-    validators.sort((a, b) => a.operator.toLowerCase().localeCompare(b.operator.toLowerCase()));
-
-    return validators;
-  }
-
-  private markValidatorsActive(config: NetworkConfig, validators: Validator[]): void {
-    let totalActive = 0;
-
-    for (const validator of validators) {
-      // Check minimum voting power
-      if (validator.votingPower < config.minInclusionVotingPower) {
-        break;
-      }
-
-      // Check if validator has keys
-      if (validator.keys.length === 0) {
-        continue;
-      }
-
-      totalActive++;
-      validator.isActive = true;
-
-      // Cap voting power if needed
-      if (config.maxVotingPower !== 0n && validator.votingPower > config.maxVotingPower) {
-        validator.votingPower = config.maxVotingPower;
-      }
-
-      // Check max validators count
-      if (config.maxValidatorsCount !== 0n && totalActive >= Number(config.maxValidatorsCount)) {
-        break;
-      }
-    }
-  }
-
-  private calcQuorumThreshold(config: NetworkConfig, totalVotingPower: bigint): bigint {
-    const threshold = config.quorumThresholds.find((q) => q.keyTag === config.requiredHeaderKeyTag);
-
-    if (!threshold) {
-      throw new Error(`No quorum threshold for key tag ${config.requiredHeaderKeyTag}`);
-    }
-
-    if (threshold.quorumThreshold === 0n) {
-      throw new Error(`Quorum threshold for key tag ${config.requiredHeaderKeyTag} is zero`);
-    }
-
-    const maxThreshold = 1000000000000000000n;
-    const mul = totalVotingPower * threshold.quorumThreshold;
-    const div = mul / maxThreshold;
-    return div + 1n;
   }
 
   private async getValsetStatus(
     settlements: CrossChainAddress[],
     epoch: number,
     preferFinalized: boolean,
-  ): Promise<{
-    status: 'committed' | 'pending' | 'missing';
-    integrity: 'valid' | 'invalid';
-  }> {
-    const hashes: Map<string, string> = new Map();
-    let allCommitted = true;
-    let lastCommitted: number = Number.MAX_SAFE_INTEGER;
-
-    for (const settlement of settlements) {
-      const client = this.getClient(settlement.chainId);
-      const settlementContract = getContract({
-        address: settlement.address,
-        abi: SETTLEMENT_ABI,
-        client,
-      });
-
-      try {
-        const isCommitted = await settlementContract.read.isValSetHeaderCommittedAt(
-          [Number(epoch)],
-          { blockTag: toBlockTag(preferFinalized) },
-        );
-
-        if (!isCommitted) {
-          allCommitted = false;
-          break;
-        }
-
-        const headerHash = (await settlementContract.read.getValSetHeaderHashAt([Number(epoch)], {
-          blockTag: toBlockTag(preferFinalized),
-        })) as Hex;
-        if (headerHash) {
-          hashes.set(`${settlement.chainId}_${settlement.address}`, headerHash);
-        }
-
-        const lastCommittedEpoch = await settlementContract.read.getLastCommittedHeaderEpoch({
-          blockTag: toBlockTag(preferFinalized),
-        });
-
-        lastCommitted = Math.min(lastCommitted, Number(lastCommittedEpoch));
-      } catch (error) {
-        console.error(`Failed to get status for settlement ${settlement.address}:`, error);
-        allCommitted = false;
-      }
-    }
-
-    // Determine global settlement status
-    let status: 'committed' | 'pending' | 'missing';
-    if (allCommitted) {
-      status = 'committed';
-    } else if (epoch < lastCommitted && lastCommitted != Number.MAX_SAFE_INTEGER) {
-      status = 'missing';
-    } else {
-      status = 'pending';
-    }
-
-    // Check integrity - all committed hashes should match
-    const uniqueHashes = new Set(hashes.values());
-    const integrity = uniqueHashes.size <= 1 ? 'valid' : 'invalid';
-
-    return { status: status, integrity: integrity };
-  }
-
-  private getValSetEventsStateKey(
-    blockTag: BlockTagPreference,
-    settlement: CrossChainAddress,
-  ): string {
-    return `${blockTag}_${this.getSettlementKey(settlement)}`;
-  }
-
-  private getSettlementKey(settlement: CrossChainAddress): string {
-    return `${settlement.chainId}_${settlement.address.toLowerCase()}`;
-  }
-
-  private getValsetEventCacheKey(epoch: number, settlement: CrossChainAddress): string {
-    return `valset_event_${this.getSettlementKey(settlement)}_${epoch}`;
-  }
-
-  private getSettlementContract(settlement: CrossChainAddress) {
-    const client = this.getClient(settlement.chainId);
-    return getContract({
-      address: settlement.address,
-      abi: SETTLEMENT_ABI,
-      client,
+  ) {
+    return this.loadValSetStatus({
+      settlements,
+      epoch,
+      finalized: preferFinalized,
     });
-  }
-
-  private async ingestSettlementEvents(
-    settlement: CrossChainAddress,
-    state: ValSetEventsState,
-    fromBlock: bigint,
-    toBlock: bigint,
-  ): Promise<void> {
-    const contract = this.getSettlementContract(settlement);
-    const [genesisLogs, commitLogs] = await Promise.all([
-      contract.getEvents.SetGenesis({ fromBlock, toBlock }),
-      contract.getEvents.CommitValSetHeader({ fromBlock, toBlock }),
-    ]);
-
-    this.processValSetEventLogs(state.map, genesisLogs, 'genesis');
-    this.processValSetEventLogs(state.map, commitLogs, 'commit');
   }
 
   private getOrCreateValSetEventsState(
     blockTag: BlockTagPreference,
     settlement: CrossChainAddress,
   ): ValSetEventsState {
-    const key = this.getValSetEventsStateKey(blockTag, settlement);
-    let state = this.valsetEventsState.get(key);
-    if (!state) {
-      state = {
-        settlement,
-        blockTag,
-        map: new Map(),
-        syncedToBlock: null,
-      };
-      this.valsetEventsState.set(key, state);
-    }
-    return state;
-  }
-
-  private async findBlockNumberForTimestamp(
-    client: PublicClient,
-    timestamp: number,
-    highestBlock: bigint,
-    highestTimestamp: number,
-  ): Promise<bigint> {
-    if (timestamp >= highestTimestamp) return highestBlock;
-
-    let low = 0n;
-    let high = highestBlock;
-    let best = 0n;
-
-    while (low <= high) {
-      const mid = (low + high) >> 1n;
-      const block = await client.getBlock({ blockNumber: mid });
-      const blockTimestamp = Number(block.timestamp);
-
-      if (blockTimestamp <= timestamp) {
-        best = mid;
-        low = mid + 1n;
-      } else {
-        if (mid === 0n) return 0n;
-        high = mid - 1n;
-      }
-    }
-
-    return best;
-  }
-
-  private async estimateEpochBlockRange(
-    epoch: number,
-    settlement: CrossChainAddress,
-    blockTag: BlockTagPreference,
-    finalized: boolean,
-  ): Promise<{ fromBlock: bigint; toBlock: bigint }> {
-    const client = this.getClient(settlement.chainId);
-    const startTimestamp = await this.getEpochStart(epoch, finalized);
-
-    let endTimestamp: number;
-    try {
-      endTimestamp = await this.getEpochStart(epoch + 1, finalized);
-    } catch {
-      try {
-        endTimestamp = await this.getNextEpochStart(finalized);
-      } catch {
-        const duration = await this.getCurrentEpochDuration(finalized);
-        endTimestamp = startTimestamp + duration;
-      }
-    }
-
-    if (endTimestamp < startTimestamp) {
-      endTimestamp = startTimestamp;
-    }
-
-    const latestBlock = await client.getBlock({ blockTag });
-    const latestNumber = latestBlock.number ?? 0n;
-    const latestTimestamp = Number(latestBlock.timestamp);
-
-    const fromEstimate = await this.findBlockNumberForTimestamp(
-      client,
-      startTimestamp,
-      latestNumber,
-      latestTimestamp,
-    );
-    const toEstimate = await this.findBlockNumberForTimestamp(
-      client,
-      endTimestamp,
-      latestNumber,
-      latestTimestamp,
-    );
-
-    const bufferedFrom =
-      fromEstimate > EPOCH_EVENT_BLOCK_BUFFER ? fromEstimate - EPOCH_EVENT_BLOCK_BUFFER : 0n;
-    let bufferedTo = toEstimate + EPOCH_EVENT_BLOCK_BUFFER;
-    if (bufferedTo > latestNumber) bufferedTo = latestNumber;
-    if (bufferedTo < bufferedFrom) bufferedTo = bufferedFrom;
-
-    return { fromBlock: bufferedFrom, toBlock: bufferedTo };
-  }
-
-  private async fetchValSetEventForEpoch(
-    epoch: number,
-    settlement: CrossChainAddress,
-    blockTag: BlockTagPreference,
-    finalized: boolean,
-    state: ValSetEventsState,
-  ): Promise<ValSetLogicEvent | null> {
-    const { fromBlock, toBlock } = await this.estimateEpochBlockRange(
-      epoch,
-      settlement,
-      blockTag,
-      finalized,
-    );
-
-    if (toBlock < fromBlock) {
-      return null;
-    }
-
-    await this.ingestSettlementEvents(settlement, state, fromBlock, toBlock);
-    state.syncedToBlock = toBlock;
-    return state.map.get(epoch) ?? null;
-  }
-
-  private async fetchValSetEventFullScan(
-    epoch: number,
-    settlement: CrossChainAddress,
-    blockTag: BlockTagPreference,
-    state: ValSetEventsState,
-  ): Promise<ValSetLogicEvent | null> {
-    const client = this.getClient(settlement.chainId);
-    const latestBlock = await client.getBlock({ blockTag });
-    const latestNumber = latestBlock.number ?? 0n;
-
-    if (state.syncedToBlock !== null && state.syncedToBlock >= latestNumber) {
-      return state.map.get(epoch) ?? null;
-    }
-
-    await this.ingestSettlementEvents(settlement, state, 0n, latestNumber);
-    state.syncedToBlock = latestNumber;
-    return state.map.get(epoch) ?? null;
-  }
-
-  private mapExtraDataEntries(
-    rawExtraData: readonly { key: Hex; value: Hex }[],
-  ): ValSetExtraData[] {
-    if (!rawExtraData || rawExtraData.length === 0) return [];
-    return rawExtraData.map((entry) => ({
-      key: entry.key as Hex,
-      value: entry.value as Hex,
-    }));
-  }
-
-  private parseValSetHeaderFromEvent(raw: any): ValidatorSetHeader {
-    return {
-      version: Number(raw.version),
-      requiredKeyTag: Number(raw.requiredKeyTag),
-      epoch: Number(raw.epoch),
-      captureTimestamp: Number(raw.captureTimestamp),
-      quorumThreshold: BigInt(raw.quorumThreshold),
-      totalVotingPower: BigInt(raw.totalVotingPower),
-      validatorsSszMRoot: raw.validatorsSszMRoot as Hex,
-    };
-  }
-
-  private isNewerValSetEvent(candidate: ValSetLogicEvent, existing: ValSetLogicEvent): boolean {
-    const candidateBlock = candidate.blockNumber ?? -1n;
-    const existingBlock = existing.blockNumber ?? -1n;
-    if (candidateBlock !== existingBlock) {
-      return candidateBlock > existingBlock;
-    }
-    const candidateIndex = candidate.logIndex ?? -1;
-    const existingIndex = existing.logIndex ?? -1;
-    return candidateIndex > existingIndex;
-  }
-
-  private processValSetEventLogs(
-    store: Map<number, ValSetLogicEvent>,
-    logs: readonly any[],
-    kind: ValSetEventKind,
-  ): void {
-    if (!logs || logs.length === 0) return;
-
-    const sorted = [...logs].sort((a, b) => {
-      const aBlock = a.blockNumber ?? 0n;
-      const bBlock = b.blockNumber ?? 0n;
-      if (aBlock === bBlock) {
-        const aIndex = a.logIndex ?? 0;
-        const bIndex = b.logIndex ?? 0;
-        return aIndex - bIndex;
-      }
-      return aBlock < bBlock ? -1 : 1;
-    });
-
-    for (const log of sorted) {
-      const args = log.args as {
-        valSetHeader: {
-          version: bigint;
-          requiredKeyTag: bigint;
-          epoch: bigint;
-          captureTimestamp: bigint;
-          quorumThreshold: bigint;
-          totalVotingPower: bigint;
-          validatorsSszMRoot: Hex;
-        };
-        extraData: readonly { key: Hex; value: Hex }[];
-      };
-      if (!args || !args.valSetHeader) continue;
-      const header = this.parseValSetHeaderFromEvent(args.valSetHeader);
-      const extraData = this.mapExtraDataEntries(args.extraData ?? []);
-      const event: ValSetLogicEvent = {
-        kind,
-        header,
-        extraData,
-        blockNumber: log.blockNumber ?? null,
-        blockHash: (log.blockHash ?? null) as Hex | null,
-        transactionHash: (log.transactionHash ?? null) as Hex | null,
-        logIndex: log.logIndex ?? null,
-      };
-      const existing = store.get(header.epoch);
-      if (!existing || this.isNewerValSetEvent(event, existing)) {
-        store.set(header.epoch, event);
-      }
-    }
+    return getOrCreateValSetEventsState(this.valsetEventsState, blockTag, settlement);
   }
 
   private async selectSettlementForEvent(
@@ -1112,152 +1083,138 @@ export class ValidatorSetDeriver {
     if (settlement) return settlement;
 
     const config = await this.getNetworkConfig(epoch, finalized);
-    const defaultSettlement = config.settlements[0];
-    if (!defaultSettlement) {
-      throw new Error('No settlement configured to retrieve validator set events');
-    }
-    return defaultSettlement;
+    return selectDefaultSettlement(config.settlements);
   }
 
   async getValSetStatus(
     epoch: number,
     finalized: boolean = true,
-  ): Promise<{ status: 'committed' | 'pending' | 'missing'; integrity: 'valid' | 'invalid' }> {
+  ): Promise<ValSetStatus> {
     await this.ensureInitialized();
     const config = await this.getNetworkConfig(epoch, finalized);
     return this.getValsetStatus(config.settlements, epoch, finalized);
   }
 
-  private async retrieveValSetEvent(params: {
-    epoch: number;
-    blockTag: BlockTagPreference;
-    settlement: CrossChainAddress;
-    finalized: boolean;
-  }): Promise<ValSetLogicEvent | null> {
-    const { epoch, blockTag, settlement, finalized } = params;
-    const state = this.getOrCreateValSetEventsState(blockTag, settlement);
-
-    let event = state.map.get(epoch) ?? null;
-
-    if (!event && finalized) {
-      event = await this.getValSetEventFromCache(epoch, settlement, state);
-    }
-
-    if (!event) {
-      event = await this.fetchValSetEventForEpoch(epoch, settlement, blockTag, finalized, state);
-      if (!event) {
-        event = await this.fetchValSetEventFullScan(epoch, settlement, blockTag, state);
-      }
-    }
-
-    if (!event && finalized) {
-      const status = await this.getValSetStatus(epoch, finalized);
-      if (status.status !== 'committed') {
-        throw new Error(
-          `Validator set epoch ${epoch} is not committed yet (status: ${status.status}).`,
-        );
-      }
-      throw new Error(
-        `Validator set epoch ${epoch} is committed but no settlement events were found using ${blockTag} data.`,
-      );
-    }
-
-    if (event && finalized) {
-      await this.setValSetEventToCache(epoch, settlement, event);
-    }
-
-    return event;
-  }
-
-  private async getValSetEventFromCache(
-    epoch: number,
-    settlement: CrossChainAddress,
-    state: ValSetEventsState,
-  ): Promise<ValSetLogicEvent | null> {
-    const cached = await this.getFromCache(this.getValsetEventCacheKey(epoch, settlement));
-    if (!cached) return null;
-    const event = cached as ValSetLogicEvent;
-    state.map.set(epoch, event);
-    return event;
-  }
-
-  private async setValSetEventToCache(
-    epoch: number,
-    settlement: CrossChainAddress,
-    event: ValSetLogicEvent,
-  ): Promise<void> {
-    await this.setToCache(this.getValsetEventCacheKey(epoch, settlement), event);
-  }
-
-  private async clearValSetEventCache(epoch: number, settlement: CrossChainAddress): Promise<void> {
-    if (!this.cache) return;
-    await this.cache.delete(this.getValsetEventCacheKey(epoch, settlement));
-  }
-
-  public async getValSetLogicEvent(options?: {
+  public async getValSetSettlementStatuses(options?: {
     epoch?: number;
     finalized?: boolean;
-    settlement?: CrossChainAddress;
-  }): Promise<ValSetLogicEvent> {
+    settlements?: CrossChainAddress[];
+  }): Promise<SettlementValSetStatus[]> {
     await this.ensureInitialized();
-
     const finalized = options?.finalized ?? true;
-    const blockTag = toBlockTag(finalized);
+    const { targetEpoch } = await this.resolveEpoch(options?.epoch, finalized);
 
-    const currentEpoch = await this.getCurrentEpoch(finalized);
-    const targetEpoch = options?.epoch ?? currentEpoch;
-
-    if (targetEpoch < 0 || !Number.isFinite(targetEpoch)) {
-      throw new Error('Unable to determine target epoch for validator set event retrieval');
+    let settlements = options?.settlements;
+    if (!settlements) {
+      const config = await this.getNetworkConfig(targetEpoch, finalized);
+      settlements = config.settlements;
     }
 
-    if (targetEpoch > currentEpoch) {
-      throw new Error(
-        `Requested epoch ${targetEpoch} is not yet available on-chain (latest is ${currentEpoch}).`,
-      );
+    if (!settlements || settlements.length === 0) {
+      return [];
     }
 
-    const settlement = await this.selectSettlementForEvent(
-      targetEpoch,
-      finalized,
-      options?.settlement,
+    const status = await this.getValsetStatus(Array.from(settlements), targetEpoch, finalized);
+    return status.settlements;
+  }
+
+  public async getValSetLogEvents(options?: {
+    epoch?: number;
+    finalized?: boolean;
+    settlements?: CrossChainAddress[];
+  }): Promise<SettlementValSetLog[]> {
+    await this.ensureInitialized();
+    const finalized = options?.finalized ?? true;
+    const { targetEpoch } = await this.resolveEpoch(options?.epoch, finalized);
+
+    let settlements = options?.settlements;
+    if (!settlements) {
+      const config = await this.getNetworkConfig(targetEpoch, finalized);
+      settlements = config.settlements;
+    }
+
+    if (!settlements || settlements.length === 0) {
+      return [];
+    }
+
+    const status = await this.getValsetStatus(Array.from(settlements), targetEpoch, finalized);
+    const results: SettlementValSetLog[] = [];
+
+    for (const detail of status.settlements) {
+      let event: ValSetLogEvent | null = null;
+      if (detail.committed) {
+        event = await this.retrieveValSetEvent({
+          epoch: targetEpoch,
+          settlement: detail.settlement,
+          finalized,
+        }, { overall: status, detail });
+      }
+
+      results.push({
+        settlement: detail.settlement,
+        committed: detail.committed,
+        event,
+      });
+    }
+
+    return results;
+  }
+
+  private async retrieveValSetEvent(
+    params: {
+      epoch: number;
+      settlement: CrossChainAddress;
+      finalized: boolean;
+    },
+    statusContext?: {
+      overall?: ValSetStatus | null;
+      detail?: SettlementValSetStatus | null;
+    },
+  ): Promise<ValSetLogEvent | null> {
+    const { epoch, settlement, finalized } = params;
+    const blockTag = blockTagFromFinality(finalized);
+    const state = this.getOrCreateValSetEventsState(blockTag, settlement);
+
+    const existing = state.map.get(epoch) ?? null;
+    if (!finalized) {
+      return existing?.event ?? null;
+    }
+
+    if (existing) {
+      return existing.event;
+    }
+
+    const event = await fetchValSetLogEvent(
+      { epoch, settlement, finalized },
+      (tag, addr) => this.getOrCreateValSetEventsState(tag, addr),
+      this.cache,
+      (ep, fin) => this.getValSetStatus(ep, fin),
+      {
+        getStart: (ep, fin) => this.getEpochStart(ep, fin),
+        getEnd: async (ep, fin, fallbackStart) => {
+          try {
+            return await this.getEpochStart(ep, fin);
+          } catch {
+            try {
+              return await this.getNextEpochStart(fin);
+            } catch {
+              const duration = await this.getCurrentEpochDuration(fin);
+              return fallbackStart + duration;
+            }
+          }
+        },
+      },
+      (chainId) => this.getClient(chainId),
+      EPOCH_EVENT_BLOCK_BUFFER,
+      statusContext,
     );
 
-    const event = await this.retrieveValSetEvent({
-      epoch: targetEpoch,
-      blockTag,
-      settlement,
-      finalized,
-    });
-
-    if (!event) {
-      throw new Error(
-        `No validator set event found for epoch ${targetEpoch} using ${blockTag} data.`,
-      );
+    if (event) {
+      const settlementSuffix = `${settlement.chainId}_${settlement.address.toLowerCase()}`;
+      await this.setToCache('valset_event', epoch, settlementSuffix, event);
     }
 
     return event;
   }
 
-  private async cleanupOldCache(currentEpoch: number): Promise<void> {
-    if (!this.cache || currentEpoch <= this.maxSavedEpochs) return;
-
-    const oldestToKeep = currentEpoch - this.maxSavedEpochs;
-
-    const cache = this.cache;
-    if (!cache) return;
-
-    for (let epoch = 0; epoch < oldestToKeep; epoch++) {
-      await cache.delete(`config_${epoch}`);
-      await cache.delete(`valset_${epoch}`);
-      const seenSettlements = new Set<string>();
-      for (const state of this.valsetEventsState.values()) {
-        state.map.delete(epoch);
-        const settlementKey = this.getSettlementKey(state.settlement);
-        if (seenSettlements.has(settlementKey)) continue;
-        seenSettlements.add(settlementKey);
-        await this.clearValSetEventCache(epoch, state.settlement);
-      }
-    }
-  }
 }
