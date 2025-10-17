@@ -40,7 +40,6 @@ import {
   totalActiveVotingPower,
 } from './validator_set.js';
 import {
-  determineValSetStatus,
   selectDefaultSettlement,
   getOrCreateValSetEventsState,
   ValSetEventsState,
@@ -48,6 +47,172 @@ import {
 } from './valset_events.js';
 
 const EPOCH_EVENT_BLOCK_BUFFER = 16n;
+
+const getSettlementContract = (client: PublicClient, settlement: CrossChainAddress) =>
+  getContract({
+    address: settlement.address,
+    abi: SETTLEMENT_ABI,
+    client,
+  });
+
+type MulticallSettlementStatus = {
+  isCommitted: boolean;
+  headerHash: Hex | null;
+  lastCommittedEpoch: bigint;
+};
+
+const tryFetchSettlementStatusViaMulticall = async (
+  client: PublicClient,
+  settlement: CrossChainAddress,
+  epochNumber: number,
+  blockTag: BlockTagPreference,
+): Promise<MulticallSettlementStatus | null> => {
+  const tagsToTry: BlockTagPreference[] =
+    blockTag === 'finalized' ? [blockTag, 'latest'] : [blockTag];
+
+  for (const tag of tagsToTry) {
+    try {
+      const results = (await client.multicall({
+        allowFailure: false,
+        blockTag: tag,
+        multicallAddress: MULTICALL3_ADDRESS as Address,
+        contracts: [
+          {
+            address: settlement.address,
+            abi: SETTLEMENT_ABI,
+            functionName: 'isValSetHeaderCommittedAt',
+            args: [epochNumber] as const,
+          },
+          {
+            address: settlement.address,
+            abi: SETTLEMENT_ABI,
+            functionName: 'getValSetHeaderHashAt',
+            args: [epochNumber] as const,
+          },
+          {
+            address: settlement.address,
+            abi: SETTLEMENT_ABI,
+            functionName: 'getLastCommittedHeaderEpoch',
+          },
+        ],
+      })) as readonly unknown[];
+
+      const [isCommittedRaw, headerHashRaw, lastCommittedEpochRaw] = results;
+      let headerHash: Hex | null = null;
+      if (typeof headerHashRaw === 'string') {
+        headerHash = headerHashRaw as Hex;
+      }
+
+      let lastCommittedEpoch: bigint = 0n;
+      if (typeof lastCommittedEpochRaw === 'bigint') {
+        lastCommittedEpoch = lastCommittedEpochRaw;
+      } else if (
+        typeof lastCommittedEpochRaw === 'number' ||
+        typeof lastCommittedEpochRaw === 'string'
+      ) {
+        lastCommittedEpoch = BigInt(lastCommittedEpochRaw);
+      }
+
+      return {
+        isCommitted: Boolean(isCommittedRaw),
+        headerHash,
+        lastCommittedEpoch,
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+};
+
+export const determineValSetStatus = async (
+  clientFactory: (chainId: number) => PublicClient,
+  settlements: readonly CrossChainAddress[],
+  epoch: number,
+  preferFinalized: boolean,
+): Promise<ValSetStatus> => {
+  const hashes: Map<string, string> = new Map();
+  let allCommitted = true;
+  let lastCommitted: number = Number.MAX_SAFE_INTEGER;
+  const details: SettlementValSetStatus[] = [];
+
+  const blockTag = blockTagFromFinality(preferFinalized);
+  const epochNumber = Number(epoch);
+
+  for (const settlement of settlements) {
+    const client = clientFactory(settlement.chainId);
+    const detail: SettlementValSetStatus = {
+      settlement,
+      committed: false,
+      headerHash: null,
+      lastCommittedEpoch: null,
+    };
+
+    const multiResult = await tryFetchSettlementStatusViaMulticall(
+      client,
+      settlement,
+      epochNumber,
+      blockTag,
+    );
+
+    if (multiResult) {
+      const committed = Boolean(multiResult.isCommitted);
+      detail.committed = committed;
+      detail.headerHash = multiResult.headerHash;
+      detail.lastCommittedEpoch = Number(multiResult.lastCommittedEpoch);
+    } else {
+      const settlementContract = getSettlementContract(client, settlement);
+      const isCommitted = await settlementContract.read.isValSetHeaderCommittedAt([epochNumber], {
+        blockTag,
+      });
+      detail.committed = Boolean(isCommitted);
+
+      if (detail.committed) {
+        const headerHash = (await settlementContract.read.getValSetHeaderHashAt([epochNumber], {
+          blockTag,
+        })) as Hex;
+        detail.headerHash = headerHash ?? null;
+      }
+
+      const lastCommittedEpoch = await settlementContract.read.getLastCommittedHeaderEpoch({
+        blockTag,
+      });
+      detail.lastCommittedEpoch = Number(lastCommittedEpoch);
+    }
+
+    if (detail.committed && detail.headerHash) {
+      hashes.set(`${settlement.chainId}_${settlement.address}`, detail.headerHash);
+    }
+
+    if (!detail.committed) {
+      allCommitted = false;
+    }
+
+    if (
+      detail.lastCommittedEpoch !== null &&
+      Number.isFinite(detail.lastCommittedEpoch)
+    ) {
+      lastCommitted = Math.min(lastCommitted, detail.lastCommittedEpoch);
+    }
+
+    details.push(detail);
+  }
+
+  let status: ValSetStatus['status'];
+  if (allCommitted) {
+    status = 'committed';
+  } else if (epoch < lastCommitted && lastCommitted !== Number.MAX_SAFE_INTEGER) {
+    status = 'missing';
+  } else {
+    status = 'pending';
+  }
+
+  const uniqueHashes = new Set(hashes.values());
+  const integrity: ValSetStatus['integrity'] = uniqueHashes.size <= 1 ? 'valid' : 'invalid';
+
+  return { status, integrity, settlements: details };
+};
 
 type DriverReadMethod =
   | 'getCurrentEpoch'
