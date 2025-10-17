@@ -71,7 +71,7 @@ export const ingestSettlementEvents = async (
   toBlock: bigint,
 ): Promise<void> => {
   const filteredEvents = SETTLEMENT_ABI.filter(
-    (item): item is Extract<typeof SETTLEMENT_ABI[number], { type: 'event' }> =>
+    (item): item is Extract<(typeof SETTLEMENT_ABI)[number], { type: 'event' }> =>
       item.type === 'event' && (item.name === 'SetGenesis' || item.name === 'CommitValSetHeader'),
   );
 
@@ -85,7 +85,9 @@ export const ingestSettlementEvents = async (
   const blockTimestampCache = new Map<bigint, number>();
 
   for (const log of logs) {
-    const rawHeader = toRawValSetHeader((log.args as SettlementEventArgs | undefined)?.valSetHeader);
+    const rawHeader = toRawValSetHeader(
+      (log.args as SettlementEventArgs | undefined)?.valSetHeader,
+    );
     if (!rawHeader) continue;
 
     const extraData = toEventExtraData((log.args as SettlementEventArgs | undefined)?.extraData);
@@ -146,7 +148,9 @@ type RawValSetHeader = {
   totalVotingPower: bigint;
   validatorsSszMRoot: Hex;
 };
-const toRawValSetHeader = (value: SettlementEventHeaderLike | null | undefined): RawValSetHeader | null => {
+const toRawValSetHeader = (
+  value: SettlementEventHeaderLike | null | undefined,
+): RawValSetHeader | null => {
   if (!value) return null;
   const toBigInt = (input: bigint | number | string | undefined): bigint | null => {
     if (typeof input === 'bigint') return input;
@@ -384,10 +388,7 @@ export const retrieveValSetEvent = async (
     settlement: CrossChainAddress;
     finalized: boolean;
   },
-  stateFactory: (
-    blockTag: BlockTagPreference,
-    settlement: CrossChainAddress,
-  ) => ValSetEventsState,
+  stateFactory: (blockTag: BlockTagPreference, settlement: CrossChainAddress) => ValSetEventsState,
   cache: CacheInterface | null,
   statusFetcher: (epoch: number, finalized: boolean) => Promise<ValSetStatus>,
   blockMetrics: {
@@ -450,8 +451,7 @@ export const retrieveValSetEvent = async (
       );
     }
 
-    const status =
-      overallStatus ?? (await statusFetcher(epoch, finalized));
+    const status = overallStatus ?? (await statusFetcher(epoch, finalized));
 
     if (status.status !== 'committed') {
       throw new Error(

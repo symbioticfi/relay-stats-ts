@@ -28,7 +28,12 @@ import {
   MULTICALL_VOTING_CALL_GAS,
   MULTICALL_KEYS_CALL_GAS,
 } from './constants.js';
-import { VALSET_DRIVER_ABI, SETTLEMENT_ABI, VOTING_POWER_PROVIDER_ABI, KEY_REGISTRY_ABI } from './abi.js';
+import {
+  VALSET_DRIVER_ABI,
+  SETTLEMENT_ABI,
+  VOTING_POWER_PROVIDER_ABI,
+  KEY_REGISTRY_ABI,
+} from './abi.js';
 import { blockTagFromFinality, type BlockTagPreference } from './utils.js';
 import {
   calculateQuorumThreshold,
@@ -189,10 +194,7 @@ export const determineValSetStatus = async (
       allCommitted = false;
     }
 
-    if (
-      detail.lastCommittedEpoch !== null &&
-      Number.isFinite(detail.lastCommittedEpoch)
-    ) {
+    if (detail.lastCommittedEpoch !== null && Number.isFinite(detail.lastCommittedEpoch)) {
       lastCommitted = Math.min(lastCommitted, detail.lastCommittedEpoch);
     }
 
@@ -433,13 +435,12 @@ export class ValidatorSetDeriver {
       networkData = await this.getNetworkData(settlement, finalized);
     }
 
-    let aggregatorsExtraData: AggregatorExtraDataEntry[] | undefined;
     const tags =
       options?.aggregatorKeyTags && options.aggregatorKeyTags.length > 0
         ? options.aggregatorKeyTags
         : config.requiredKeyTags;
     const mode = config.verificationType === 1 ? AGGREGATOR_MODE.ZK : AGGREGATOR_MODE.SIMPLE;
-    aggregatorsExtraData = await this.loadAggregatorsExtraData({
+    const aggregatorsExtraData = await this.loadAggregatorsExtraData({
       mode,
       tags,
       validatorSet,
@@ -671,7 +672,10 @@ export class ValidatorSetDeriver {
   }
 
   private settlementsCacheKey(settlements: readonly CrossChainAddress[]): string {
-    return settlements.map((s) => this.settlementCacheKey(s)).sort().join('|');
+    return settlements
+      .map((s) => this.settlementCacheKey(s))
+      .sort()
+      .join('|');
   }
 
   private async loadValSetStatus(params: {
@@ -966,7 +970,12 @@ export class ValidatorSetDeriver {
     }
   }
 
-  private async setToCache(namespace: string, epoch: number, key: string, value: any): Promise<void> {
+  private async setToCache(
+    namespace: string,
+    epoch: number,
+    key: string,
+    value: any,
+  ): Promise<void> {
     if (!this.cache) return;
     try {
       await this.cache.set(epoch, key, value);
@@ -1251,10 +1260,7 @@ export class ValidatorSetDeriver {
     return selectDefaultSettlement(config.settlements);
   }
 
-  async getValSetStatus(
-    epoch: number,
-    finalized: boolean = true,
-  ): Promise<ValSetStatus> {
+  async getValSetStatus(epoch: number, finalized: boolean = true): Promise<ValSetStatus> {
     await this.ensureInitialized();
     const config = await this.getNetworkConfig(epoch, finalized);
     return this.getValsetStatus(config.settlements, epoch, finalized);
@@ -1308,11 +1314,14 @@ export class ValidatorSetDeriver {
     for (const detail of status.settlements) {
       let event: ValSetLogEvent | null = null;
       if (detail.committed) {
-        event = await this.retrieveValSetEvent({
-          epoch: targetEpoch,
-          settlement: detail.settlement,
-          finalized,
-        }, { overall: status, detail });
+        event = await this.retrieveValSetEvent(
+          {
+            epoch: targetEpoch,
+            settlement: detail.settlement,
+            finalized,
+          },
+          { overall: status, detail },
+        );
       }
 
       results.push({
@@ -1381,5 +1390,4 @@ export class ValidatorSetDeriver {
 
     return event;
   }
-
 }
