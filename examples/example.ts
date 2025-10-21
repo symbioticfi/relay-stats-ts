@@ -210,9 +210,21 @@ const ui = {
           ui.info('    Status', validator.isActive ? `${COLORS.green}Active${COLORS.reset}` : `${COLORS.red}Inactive${COLORS.reset}`);
           ui.info('    Vaults', validator.vaults.length);
           validator.vaults.forEach((vault, vaultIndex) => {
+            const collateralParts: string[] = [];
+            if (vault.collateral) {
+              collateralParts.push(vault.collateral);
+            }
+            if (vault.collateralSymbol) {
+              collateralParts.push(`symbol ${vault.collateralSymbol}`);
+            }
+            if (vault.collateralName) {
+              collateralParts.push(`name ${vault.collateralName}`);
+            }
+            const collateralInfo =
+              collateralParts.length > 0 ? ` – collateral ${collateralParts.join(', ')}` : '';
             ui.numbered(
               vaultIndex + 1,
-              `Chain ${vault.chainId} · ${vault.vault} (${vault.votingPower.toString()} VP)`,
+              `Chain ${vault.chainId} · ${vault.vault} (${vault.votingPower.toString()} VP)${collateralInfo}`,
             );
           });
           ui.info('    Keys', validator.keys.length);
@@ -586,6 +598,47 @@ const ui = {
     }
     if (metadata.logIndex !== undefined && metadata.logIndex !== null) {
       ui.info('    Log Index', metadata.logIndex);
+    }
+    if (event.quorumProof) {
+      ui.info('    Quorum Proof Mode', event.quorumProof.mode);
+      if (event.quorumProof.mode === 'simple') {
+        ui.info('    Aggregated Signature', event.quorumProof.aggregatedSignature);
+        ui.info('    Aggregated Public Key', event.quorumProof.aggregatedPublicKey);
+        ui.info('    Signers', `${event.quorumProof.signers.length}`);
+        const signerPreview = event.quorumProof.signers.slice(0, 3);
+        signerPreview.forEach((signer, index) => {
+          ui.numbered(
+            index + 1,
+            `signer key=${signer.key} votingPower=${signer.votingPower.toString()}`,
+          );
+        });
+        if (event.quorumProof.signers.length > signerPreview.length) {
+          ui.bullet(
+            `... ${event.quorumProof.signers.length - signerPreview.length} additional signers omitted`,
+          );
+        }
+        if (event.quorumProof.nonSignerIndices.length > 0) {
+          const indicesPreview = event.quorumProof.nonSignerIndices.slice(0, 6);
+          ui.info(
+            '    Non-Signer Indices',
+            `${indicesPreview.join(', ')}${
+              event.quorumProof.nonSignerIndices.length > indicesPreview.length ? ', ...' : ''
+            }`,
+          );
+        } else {
+          ui.info('    Non-Signer Indices', 'none');
+        }
+      } else {
+        ui.info('    ZK Proof Elements', event.quorumProof.proof.length);
+        ui.info('    Commitments', event.quorumProof.commitments.join(', '));
+        ui.info('    Commitment PoK', event.quorumProof.commitmentPok.join(', '));
+        ui.info(
+          '    Signers Voting Power',
+          event.quorumProof.signersVotingPower.toString(),
+        );
+      }
+    } else {
+      ui.info('    Quorum Proof', 'unavailable');
     }
     displayValSetExtraData(event.extraData);
   }

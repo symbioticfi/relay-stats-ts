@@ -1,4 +1,5 @@
 import type { Hex, PublicClient } from 'viem';
+import { decodeFunctionData, hexToBytes, bytesToHex } from 'viem';
 import type {
   CrossChainAddress,
   ValSetLogEvent,
@@ -8,6 +9,10 @@ import type {
   CacheInterface,
   ValSetExtraData,
   SettlementValSetStatus,
+  ValSetQuorumProof,
+  ValSetQuorumProofSimple,
+  ValSetQuorumProofSimpleSigner,
+  ValSetQuorumProofZk,
 } from './types.js';
 import { SETTLEMENT_ABI } from './abi.js';
 import { blockTagFromFinality, type BlockTagPreference } from './utils.js';
@@ -20,7 +25,141 @@ export const valsetEventsStateKey = (
   settlement: CrossChainAddress,
 ): string => `${blockTag}_${settlementKey(settlement)}`;
 
+type VerificationMode = 'simple' | 'zk';
+
 const buildValsetCacheKey = (settlement: CrossChainAddress): string => settlementKey(settlement);
+
+const bytesToBigint = (bytes: Uint8Array): bigint => {
+  if (bytes.length === 0) return 0n;
+  return BigInt(bytesToHex(bytes));
+};
+
+const decodeSimpleQuorumProof = (proof: Hex): ValSetQuorumProofSimple | null => {
+  const bytes = hexToBytes(proof);
+  if (bytes.length < 224) {
+    return null;
+  }
+
+  const aggregatedSignature = bytesToHex(bytes.slice(0, 64)) as Hex;
+  const aggregatedPublicKey = bytesToHex(bytes.slice(64, 192)) as Hex;
+
+  const validatorCountBigint = bytesToBigint(bytes.slice(192, 224));
+  if (validatorCountBigint < 0n) return null;
+  const validatorCount = Number(validatorCountBigint);
+  if (!Number.isSafeInteger(validatorCount) || validatorCount < 0) return null;
+
+  let offset = 224;
+  const expectedLength = offset + validatorCount * 64;
+  if (bytes.length < expectedLength) return null;
+
+  const signers: ValSetQuorumProofSimpleSigner[] = [];
+
+  for (let i = 0; i < validatorCount; i++) {
+    const key = bytesToHex(bytes.slice(offset, offset + 32)) as Hex;
+    const votingPower = bytesToBigint(bytes.slice(offset + 32, offset + 64));
+    signers.push({
+      key,
+      votingPower,
+    });
+    offset += 64;
+  }
+
+  const remaining = bytes.length - offset;
+  if (remaining < 0 || remaining % 2 !== 0) {
+    return null;
+  }
+
+  const nonSignerIndices: number[] = [];
+  for (let i = offset; i < bytes.length; i += 2) {
+    const value = (bytes[i] << 8) | bytes[i + 1];
+    nonSignerIndices.push(value);
+  }
+
+  return {
+    mode: 'simple',
+    aggregatedSignature,
+    aggregatedPublicKey,
+    signers,
+    nonSignerIndices,
+    rawProof: proof,
+  };
+};
+
+const decodeZkQuorumProof = (proof: Hex): ValSetQuorumProofZk | null => {
+  const bytes = hexToBytes(proof);
+  if (bytes.length < 416) {
+    return null;
+  }
+
+  const proofElements: Hex[] = [];
+  let offset = 0;
+  for (let i = 0; i < 8; i++) {
+    proofElements.push(bytesToHex(bytes.slice(offset, offset + 32)) as Hex);
+    offset += 32;
+  }
+
+  const commitments: Hex[] = [];
+  for (let i = 0; i < 2; i++) {
+    commitments.push(bytesToHex(bytes.slice(offset, offset + 32)) as Hex);
+    offset += 32;
+  }
+
+  const commitmentPok: Hex[] = [];
+  for (let i = 0; i < 2; i++) {
+    commitmentPok.push(bytesToHex(bytes.slice(offset, offset + 32)) as Hex);
+    offset += 32;
+  }
+
+  const votingPower = bytesToBigint(bytes.slice(offset, offset + 32));
+
+  return {
+    mode: 'zk',
+    proof: proofElements,
+    commitments,
+    commitmentPok,
+    signersVotingPower: votingPower,
+    rawProof: proof,
+  };
+};
+
+const decodeQuorumProof = (proof: Hex, mode: VerificationMode): ValSetQuorumProof | null => {
+  if (!proof || proof === '0x') return null;
+  if (mode === 'zk') {
+    return decodeZkQuorumProof(proof);
+  }
+  return decodeSimpleQuorumProof(proof);
+};
+
+const fetchQuorumProofFromTransaction = async (
+  client: PublicClient,
+  transactionHash: Hex,
+  mode: VerificationMode,
+): Promise<ValSetQuorumProof | null> => {
+  try {
+    const tx = await client.getTransaction({ hash: transactionHash });
+    if (!tx || tx.input === undefined || tx.input === '0x') {
+      return null;
+    }
+
+    const decoded = decodeFunctionData({
+      abi: SETTLEMENT_ABI,
+      data: tx.input as Hex,
+    });
+
+    if (decoded.functionName !== 'commitValSetHeader') {
+      return null;
+    }
+
+    const proofArg = (decoded.args?.[2] ?? null) as Hex | null;
+    if (!proofArg) {
+      return null;
+    }
+
+    return decodeQuorumProof(proofArg, mode);
+  } catch {
+    return null;
+  }
+};
 export const getOrCreateValSetEventsState = (
   states: Map<string, ValSetEventsState>,
   blockTag: BlockTagPreference,
@@ -69,6 +208,7 @@ export const ingestSettlementEvents = async (
   state: ValSetEventsState,
   fromBlock: bigint,
   toBlock: bigint,
+  mode: VerificationMode,
 ): Promise<void> => {
   const filteredEvents = SETTLEMENT_ABI.filter(
     (item): item is Extract<(typeof SETTLEMENT_ABI)[number], { type: 'event' }> =>
@@ -83,6 +223,7 @@ export const ingestSettlementEvents = async (
   });
 
   const blockTimestampCache = new Map<bigint, number>();
+  const transactionProofCache = new Map<string, ValSetQuorumProof | null>();
 
   for (const log of logs) {
     const rawHeader = toRawValSetHeader(
@@ -114,7 +255,18 @@ export const ingestSettlementEvents = async (
     };
 
     const kind: ValSetEventKind = log.eventName === 'SetGenesis' ? 'genesis' : 'commit';
-    processValSetEventLog(state.map, rawHeader, extraData, kind, metadata);
+    let quorumProof: ValSetQuorumProof | null = null;
+    if (metadata.transactionHash && kind === 'commit') {
+      const key = metadata.transactionHash.toLowerCase();
+      if (transactionProofCache.has(key)) {
+        quorumProof = transactionProofCache.get(key) ?? null;
+      } else {
+        quorumProof = await fetchQuorumProofFromTransaction(client, metadata.transactionHash, mode);
+        transactionProofCache.set(key, quorumProof ?? null);
+      }
+    }
+
+    processValSetEventLog(state.map, rawHeader, extraData, kind, metadata, quorumProof);
   }
 };
 
@@ -214,6 +366,7 @@ const processValSetEventLog = (
     transactionHash?: Hex;
     logIndex?: number;
   },
+  quorumProof: ValSetQuorumProof | null,
 ): void => {
   const parsedHeader = parseValSetHeaderFromEvent(header);
   const event: ValSetLogEvent = {
@@ -223,6 +376,7 @@ const processValSetEventLog = (
     blockNumber: metadata.blockNumber ?? null,
     blockTimestamp: metadata.blockTimestamp ?? null,
     transactionHash: metadata.transactionHash ?? null,
+    quorumProof: quorumProof ?? null,
   };
 
   const candidate: StoredValSetEvent = {
@@ -340,9 +494,11 @@ export const loadValSetEvent = async (
     startTimestamp: number;
     endTimestamp: number;
     buffer: bigint;
+    mode: VerificationMode;
+    allowCache: boolean;
   },
 ): Promise<ValSetLogEvent | null> => {
-  const { epoch, settlement, finalized, startTimestamp, endTimestamp, buffer } = params;
+  const { epoch, settlement, finalized, startTimestamp, endTimestamp, buffer, mode, allowCache } = params;
   const blockTag = blockTagFromFinality(finalized);
 
   const existing = state.map.get(epoch) ?? null;
@@ -369,13 +525,13 @@ export const loadValSetEvent = async (
   );
 
   if (toBlock >= fromBlock) {
-    await ingestSettlementEvents(client, settlement, state, fromBlock, toBlock);
+    await ingestSettlementEvents(client, settlement, state, fromBlock, toBlock, mode);
   }
 
   const stored = state.map.get(epoch) ?? null;
   const event = stored?.event ?? null;
 
-  if (event && cache) {
+  if (event && cache && allowCache) {
     await cache.set(epoch, cacheKey, event);
   }
 
@@ -387,6 +543,7 @@ export const retrieveValSetEvent = async (
     epoch: number;
     settlement: CrossChainAddress;
     finalized: boolean;
+    mode: VerificationMode;
   },
   stateFactory: (blockTag: BlockTagPreference, settlement: CrossChainAddress) => ValSetEventsState,
   cache: CacheInterface | null,
@@ -401,8 +558,9 @@ export const retrieveValSetEvent = async (
     overall?: ValSetStatus | null;
     detail?: SettlementValSetStatus | null;
   },
+  allowCache: boolean = false,
 ): Promise<ValSetLogEvent | null> => {
-  const { epoch, settlement, finalized } = params;
+  const { epoch, settlement, finalized, mode } = params;
   const blockTag = blockTagFromFinality(finalized);
   const state = stateFactory(blockTag, settlement);
 
@@ -420,6 +578,8 @@ export const retrieveValSetEvent = async (
       startTimestamp,
       endTimestamp,
       buffer,
+      mode,
+      allowCache,
     }));
 
   if (!event) {

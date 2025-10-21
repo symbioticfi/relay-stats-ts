@@ -146,6 +146,38 @@ export const VALSET_DRIVER_ABI = [
 export const SETTLEMENT_ABI = [
   {
     type: 'function',
+    name: 'commitValSetHeader',
+    inputs: [
+      {
+        name: 'header',
+        type: 'tuple',
+        internalType: 'struct ISettlement.ValSetHeader',
+        components: [
+          { name: 'version', type: 'uint8', internalType: 'uint8' },
+          { name: 'requiredKeyTag', type: 'uint8', internalType: 'uint8' },
+          { name: 'epoch', type: 'uint48', internalType: 'uint48' },
+          { name: 'captureTimestamp', type: 'uint48', internalType: 'uint48' },
+          { name: 'quorumThreshold', type: 'uint256', internalType: 'uint256' },
+          { name: 'totalVotingPower', type: 'uint256', internalType: 'uint256' },
+          { name: 'validatorsSszMRoot', type: 'bytes32', internalType: 'bytes32' },
+        ],
+      },
+      {
+        name: 'extraData',
+        type: 'tuple[]',
+        internalType: 'struct ISettlement.ExtraData[]',
+        components: [
+          { name: 'key', type: 'bytes32', internalType: 'bytes32' },
+          { name: 'value', type: 'bytes32', internalType: 'bytes32' },
+        ],
+      },
+      { name: 'proof', type: 'bytes', internalType: 'bytes' },
+    ],
+    outputs: [],
+    stateMutability: 'nonpayable',
+  },
+  {
+    type: 'function',
     name: 'isValSetHeaderCommittedAt',
     inputs: [{ name: 'epoch', type: 'uint48', internalType: 'uint48' }],
     outputs: [{ name: '', type: 'bool', internalType: 'bool' }],
@@ -360,6 +392,33 @@ export const KEY_REGISTRY_ABI = [
         ],
       },
     ],
+    stateMutability: 'view',
+  },
+] as const;
+
+export const VAULT_ABI = [
+  {
+    type: 'function',
+    name: 'collateral',
+    inputs: [],
+    outputs: [{ name: '', type: 'address', internalType: 'address' }],
+    stateMutability: 'view',
+  },
+] as const;
+
+export const ERC20_METADATA_ABI = [
+  {
+    type: 'function',
+    name: 'symbol',
+    inputs: [],
+    outputs: [{ name: '', type: 'string', internalType: 'string' }],
+    stateMutability: 'view',
+  },
+  {
+    type: 'function',
+    name: 'name',
+    inputs: [],
+    outputs: [{ name: '', type: 'string', internalType: 'string' }],
     stateMutability: 'view',
   },
 ] as const;

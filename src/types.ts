@@ -50,10 +50,38 @@ export interface ValidatorKey {
   payload: Hex;
 }
 
+export interface ValSetQuorumProofSimpleSigner {
+  key: Hex;
+  votingPower: bigint;
+}
+
+export interface ValSetQuorumProofSimple {
+  mode: 'simple';
+  aggregatedSignature: Hex;
+  aggregatedPublicKey: Hex;
+  signers: ValSetQuorumProofSimpleSigner[];
+  nonSignerIndices: number[];
+  rawProof: Hex;
+}
+
+export interface ValSetQuorumProofZk {
+  mode: 'zk';
+  proof: Hex[];
+  commitments: Hex[];
+  commitmentPok: Hex[];
+  signersVotingPower: bigint;
+  rawProof: Hex;
+}
+
+export type ValSetQuorumProof = ValSetQuorumProofSimple | ValSetQuorumProofZk;
+
 export interface ValidatorVault {
   vault: Address;
   votingPower: bigint;
   chainId: number;
+  collateral?: Address;
+  collateralSymbol?: string;
+  collateralName?: string;
 }
 
 export interface Validator {
@@ -104,6 +132,7 @@ export interface ValSetLogEvent {
   blockNumber: bigint | null;
   blockTimestamp: number | null;
   transactionHash: Hex | null;
+  quorumProof?: ValSetQuorumProof | null;
 }
 
 export interface SettlementValSetStatus {

@@ -1,9 +1,20 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { createPublicClient, http, PublicClient, Address, Hex, getContract } from 'viem';
+import {
+  createPublicClient,
+  http,
+  PublicClient,
+  Address,
+  Hex,
+  getContract,
+  hexToString,
+  isHex,
+} from 'viem';
+import type { Abi } from 'viem';
 import {
   CrossChainAddress,
   NetworkConfig,
   ValidatorSet,
+  Validator,
   OperatorVotingPower,
   OperatorWithKeys,
   CacheInterface,
@@ -27,12 +38,16 @@ import {
   MULTICALL_TARGET_GAS,
   MULTICALL_VOTING_CALL_GAS,
   MULTICALL_KEYS_CALL_GAS,
+  MULTICALL_VAULT_COLLATERAL_CALL_GAS,
+  MULTICALL_ERC20_METADATA_CALL_GAS,
 } from './constants.js';
 import {
   VALSET_DRIVER_ABI,
   SETTLEMENT_ABI,
   VOTING_POWER_PROVIDER_ABI,
   KEY_REGISTRY_ABI,
+  VAULT_ABI,
+  ERC20_METADATA_ABI,
 } from './abi.js';
 import { blockTagFromFinality, type BlockTagPreference } from './utils.js';
 import {
@@ -64,6 +79,14 @@ type MulticallSettlementStatus = {
   isCommitted: boolean;
   headerHash: Hex | null;
   lastCommittedEpoch: bigint;
+};
+
+type MulticallRequest = {
+  address: Address;
+  abi: Abi;
+  functionName: string;
+  args: readonly unknown[];
+  estimatedGas?: bigint;
 };
 
 const tryFetchSettlementStatusViaMulticall = async (
@@ -399,8 +422,10 @@ export class ValidatorSetDeriver {
     let validatorSet: ValidatorSet | null = null;
     if (useCache) {
       const cached = await this.getFromCache('valset', targetEpoch, cacheKey);
-      if (cached) {
-        validatorSet = cached as ValidatorSet;
+      if (cached && this.isValidatorSet(cached) && this.canCacheValidatorSet(cached)) {
+        validatorSet = cached;
+      } else if (cached) {
+        await this.deleteFromCache('valset', targetEpoch, cacheKey);
       }
     }
     if (!validatorSet) {
@@ -416,12 +441,16 @@ export class ValidatorSetDeriver {
     let settlementStatuses: SettlementValSetStatus[] = [];
     let valsetStatusData: ValSetStatus | null = null;
     if (config.settlements.length > 0) {
-      valsetStatusData = await this.getValsetStatus(
-        Array.from(config.settlements),
+      valsetStatusData = await this.updateValidatorSetStatus(
+        validatorSet,
+        config.settlements,
         targetEpoch,
         finalized,
       );
       settlementStatuses = valsetStatusData.settlements;
+      if (useCache && this.canCacheValSetStatus(valsetStatusData)) {
+        await this.setToCache('valset', targetEpoch, cacheKey, validatorSet);
+      }
     }
 
     const includeNetworkData = options?.includeNetworkData ?? false;
@@ -439,13 +468,29 @@ export class ValidatorSetDeriver {
       options?.aggregatorKeyTags && options.aggregatorKeyTags.length > 0
         ? options.aggregatorKeyTags
         : config.requiredKeyTags;
-    const mode = config.verificationType === 1 ? AGGREGATOR_MODE.ZK : AGGREGATOR_MODE.SIMPLE;
+    const verificationMode = this.getVerificationMode(config);
     const aggregatorsExtraData = await this.loadAggregatorsExtraData({
-      mode,
+      mode: verificationMode,
       tags,
       validatorSet,
       finalized,
     });
+
+    if (finalized && this.canCacheValidatorSet(validatorSet)) {
+      const requiredTagsSorted = [...config.requiredKeyTags].sort((a, b) => a - b);
+      const oppositeMode =
+        verificationMode === AGGREGATOR_MODE.SIMPLE
+          ? AGGREGATOR_MODE.ZK
+          : AGGREGATOR_MODE.SIMPLE;
+      if (oppositeMode !== verificationMode) {
+        await this.loadAggregatorsExtraData({
+          mode: oppositeMode,
+          tags: requiredTagsSorted,
+          validatorSet,
+          finalized,
+        });
+      }
+    }
 
     let valSetEvents: SettlementValSetLog[] | undefined;
     if (includeValSetEvent) {
@@ -461,8 +506,10 @@ export class ValidatorSetDeriver {
                 epoch: targetEpoch,
                 settlement: detail.settlement,
                 finalized,
+                mode: verificationMode,
               },
               { overall: valsetStatusData, detail },
+              finalized && !!valsetStatusData && valsetStatusData.status === 'committed',
             );
           }
           events.push({
@@ -570,6 +617,76 @@ export class ValidatorSetDeriver {
       );
     }
     return { currentEpoch, targetEpoch };
+  }
+
+  private getVerificationMode(config: NetworkConfig): AggregatorMode {
+    return config.verificationType === 0 ? AGGREGATOR_MODE.ZK : AGGREGATOR_MODE.SIMPLE;
+  }
+
+  private isValSetStatus(value: unknown): value is ValSetStatus {
+    if (!value || typeof value !== 'object') return false;
+    const candidate = value as ValSetStatus;
+    return (
+      (candidate.status === 'committed' ||
+        candidate.status === 'pending' ||
+        candidate.status === 'missing') &&
+      (candidate.integrity === 'valid' || candidate.integrity === 'invalid') &&
+      Array.isArray(candidate.settlements)
+    );
+  }
+
+  private isValidatorSet(value: unknown): value is ValidatorSet {
+    if (!value || typeof value !== 'object' || value === null) return false;
+    const candidate = value as ValidatorSet;
+    return (
+      typeof candidate.epoch === 'number' &&
+      typeof candidate.status === 'string' &&
+      Array.isArray(candidate.validators)
+    );
+  }
+
+  private canCacheValSetStatus(status: ValSetStatus): boolean {
+    return status.status === 'committed';
+  }
+
+  private canCacheValidatorSet(validatorSet: ValidatorSet): boolean {
+    return validatorSet.status === 'committed' && validatorSet.integrity === 'valid';
+  }
+
+  private isAggregatorExtraCacheEntry(
+    value: unknown,
+  ): value is { hash: Hex; data: AggregatorExtraDataEntry[] } {
+    if (!value || typeof value !== 'object') return false;
+    const candidate = value as { hash?: unknown; data?: unknown };
+    return (
+      typeof candidate.hash === 'string' &&
+      Array.isArray(candidate.data)
+    );
+  }
+
+  private async updateValidatorSetStatus(
+    validatorSet: ValidatorSet,
+    settlements: readonly CrossChainAddress[],
+    epoch: number,
+    finalized: boolean,
+  ): Promise<ValSetStatus> {
+    const statusInfo = await this.loadValSetStatus({
+      settlements,
+      epoch,
+      finalized,
+    });
+
+    validatorSet.status = statusInfo.status;
+    validatorSet.integrity = statusInfo.integrity;
+
+    if (statusInfo.integrity === 'invalid') {
+      throw new Error(
+        `Settlement integrity check failed for epoch ${epoch}. ` +
+          `Header hashes do not match across settlements, indicating a critical issue with the validator set.`,
+      );
+    }
+
+    return statusInfo;
   }
 
   private isCachedNetworkConfigEntry(value: unknown): value is CachedNetworkConfigEntry {
@@ -689,11 +806,11 @@ export class ValidatorSetDeriver {
 
     if (useCache) {
       const cached = await this.getFromCache('valset_status', epoch, key);
+      if (cached && this.isValSetStatus(cached) && this.canCacheValSetStatus(cached)) {
+        return cached;
+      }
       if (cached) {
-        const value = cached as ValSetStatus;
-        if (Array.isArray(value.settlements)) {
-          return value;
-        }
+        await this.deleteFromCache('valset_status', epoch, key);
       }
     }
 
@@ -704,7 +821,7 @@ export class ValidatorSetDeriver {
       finalized,
     );
 
-    if (useCache) {
+    if (useCache && this.canCacheValSetStatus(status)) {
       await this.setToCache('valset_status', epoch, key, status);
     }
 
@@ -721,10 +838,17 @@ export class ValidatorSetDeriver {
     const sortedTags = [...tags].sort((a, b) => a - b);
     const cacheKey = `${mode}_${sortedTags.join(',')}`;
     const useCache = finalized;
+    const cacheable = useCache && this.canCacheValidatorSet(validatorSet);
+    const validatorSetHash = cacheable ? this.getValidatorSetHeaderHash(validatorSet) : null;
 
-    if (useCache) {
+    if (cacheable && validatorSetHash) {
       const cached = await this.getFromCache('aggregator_extra', validatorSet.epoch, cacheKey);
-      if (cached) return cached as AggregatorExtraDataEntry[];
+      if (cached && this.isAggregatorExtraCacheEntry(cached) && cached.hash === validatorSetHash) {
+        return cached.data;
+      }
+      if (cached) {
+        await this.deleteFromCache('aggregator_extra', validatorSet.epoch, cacheKey);
+      }
     }
 
     const result =
@@ -732,8 +856,11 @@ export class ValidatorSetDeriver {
         ? buildSimpleExtraData(validatorSet, sortedTags)
         : await buildZkExtraData(validatorSet, sortedTags);
 
-    if (useCache) {
-      await this.setToCache('aggregator_extra', validatorSet.epoch, cacheKey, result);
+    if (cacheable && validatorSetHash) {
+      await this.setToCache('aggregator_extra', validatorSet.epoch, cacheKey, {
+        hash: validatorSetHash,
+        data: result,
+      });
     }
 
     return result;
@@ -763,16 +890,11 @@ export class ValidatorSetDeriver {
     const keys = await this.getKeys(config.keysProvider, timestampNumber, finalized);
 
     const validators = composeValidators(config, allVotingPowers, keys);
+    await this.populateVaultCollateralMetadata(validators, finalized);
     const totalVotingPower = validators
       .filter((validator) => validator.isActive)
       .reduce((sum, validator) => sum + validator.votingPower, 0n);
     const quorumThreshold = calculateQuorumThreshold(config, totalVotingPower);
-
-    const { status, integrity } = await this.loadValSetStatus({
-      settlements: config.settlements,
-      epoch: targetEpoch,
-      finalized,
-    });
 
     const sortedRequiredTags = [...config.requiredKeyTags].sort((a, b) => a - b);
 
@@ -784,8 +906,8 @@ export class ValidatorSetDeriver {
       quorumThreshold,
       validators,
       totalVotingPower,
-      status,
-      integrity,
+      status: 'pending',
+      integrity: 'valid',
       extraData: [],
     };
 
@@ -806,28 +928,8 @@ export class ValidatorSetDeriver {
       extraData,
     };
 
-    if (result.integrity === 'invalid') {
-      throw new Error(
-        `Settlement integrity check failed for epoch ${targetEpoch}. ` +
-          `Header hashes do not match across settlements, indicating a critical issue with the validator set.`,
-      );
-    }
-
     if (useCache) {
       await this.setToCache('valset', targetEpoch, cacheKey, result);
-      const tagsKey = sortedRequiredTags.join(',');
-      await this.setToCache(
-        'aggregator_extra',
-        targetEpoch,
-        `${AGGREGATOR_MODE.SIMPLE}_${tagsKey}`,
-        simpleExtra,
-      );
-      await this.setToCache(
-        'aggregator_extra',
-        targetEpoch,
-        `${AGGREGATOR_MODE.ZK}_${tagsKey}`,
-        zkExtra,
-      );
     }
 
     return result;
@@ -875,21 +977,17 @@ export class ValidatorSetDeriver {
     client,
     requests,
     blockTag,
+    allowFailure = false,
   }: {
     client: PublicClient;
-    requests: {
-      address: Address;
-      abi: typeof VOTING_POWER_PROVIDER_ABI | typeof KEY_REGISTRY_ABI;
-      functionName: string;
-      args: readonly unknown[];
-      estimatedGas: bigint;
-    }[];
+    requests: readonly MulticallRequest[];
     blockTag: BlockTagPreference;
+    allowFailure?: boolean;
   }): Promise<T[]> {
     if (requests.length === 0) return [];
 
-    const chunks: (typeof requests)[] = [];
-    let currentChunk: typeof requests = [];
+    const chunks: MulticallRequest[][] = [];
+    let currentChunk: MulticallRequest[] = [];
     let currentGas: bigint = 0n;
 
     for (const request of requests) {
@@ -913,22 +1011,275 @@ export class ValidatorSetDeriver {
 
     for (const chunk of chunks) {
       const rawResult = await client.multicall({
-        allowFailure: false,
+        allowFailure,
         blockTag,
         multicallAddress: MULTICALL3_ADDRESS as Address,
         contracts: chunk.map((item) => ({
           address: item.address,
           abi: item.abi,
-          functionName: item.functionName as 'getOperatorVotingPowersAt' | 'getKeysAt',
+          functionName: item.functionName as never,
           args: item.args,
         })),
       });
 
-      const chunkResult = rawResult as unknown as T[];
-      results.push(...chunkResult);
+      if (allowFailure) {
+        const chunkResult = (rawResult as readonly { status: 'success' | 'failure'; result: unknown }[]).map(
+          (entry) => (entry.status === 'success' ? (entry.result as T) : (null as T)),
+        );
+        results.push(...chunkResult);
+      } else {
+        const chunkResult = rawResult as unknown as T[];
+        results.push(...chunkResult);
+      }
     }
 
     return results;
+  }
+
+  private async populateVaultCollateralMetadata(
+    validators: Validator[],
+    finalized: boolean,
+  ): Promise<void> {
+    const vaultsByChain = new Map<number, Address[]>();
+
+    for (const validator of validators) {
+      for (const vault of validator.vaults) {
+        let list = vaultsByChain.get(vault.chainId);
+        if (!list) {
+          list = [];
+          vaultsByChain.set(vault.chainId, list);
+        }
+        list.push(vault.vault);
+      }
+    }
+
+    if (vaultsByChain.size === 0) return;
+
+    const blockTag = blockTagFromFinality(finalized);
+    const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
+    const vaultCollateralMap = new Map<string, Address>();
+    const tokensByChain = new Map<number, Map<string, Address>>();
+    const chainMulticallSupport = new Map<number, boolean>();
+
+    for (const [chainId, vaultAddresses] of vaultsByChain) {
+      const client = this.getClient(chainId);
+      const uniqueVaults = this.dedupeAddresses(vaultAddresses);
+      if (uniqueVaults.length === 0) continue;
+
+      const hasMulticall = await this.multicallExists(chainId, blockTag);
+      chainMulticallSupport.set(chainId, hasMulticall);
+
+      let tokensForChain = tokensByChain.get(chainId);
+      if (!tokensForChain) {
+        tokensForChain = new Map<string, Address>();
+        tokensByChain.set(chainId, tokensForChain);
+      }
+      let collateralResults: (Address | null)[] = [];
+
+      if (hasMulticall) {
+        collateralResults = await this.executeChunkedMulticall<Address | null>({
+          client,
+          requests: uniqueVaults.map((address) => ({
+            address,
+            abi: VAULT_ABI as Abi,
+            functionName: 'collateral',
+            args: [],
+            estimatedGas: MULTICALL_VAULT_COLLATERAL_CALL_GAS,
+          })),
+          blockTag,
+          allowFailure: true,
+        });
+      }
+
+      if (collateralResults.length === 0) {
+        collateralResults = Array(uniqueVaults.length).fill(null);
+      }
+
+      for (let i = 0; i < uniqueVaults.length; i++) {
+        if (!collateralResults[i]) {
+          try {
+            const fallback = (await client.readContract({
+              address: uniqueVaults[i],
+              abi: VAULT_ABI,
+              functionName: 'collateral',
+              args: [],
+              blockTag,
+            })) as Address;
+            collateralResults[i] = fallback;
+          } catch {
+            collateralResults[i] = null;
+          }
+        }
+
+        const collateral = collateralResults[i];
+        if (!collateral || collateral.toLowerCase() === ZERO_ADDRESS) continue;
+
+        vaultCollateralMap.set(`${chainId}_${uniqueVaults[i].toLowerCase()}`, collateral as Address);
+        tokensForChain.set(collateral.toLowerCase(), collateral as Address);
+      }
+    }
+
+    if (vaultCollateralMap.size === 0) return;
+
+    const metadataMap = new Map<string, { symbol?: string; name?: string }>();
+
+    for (const [chainId, tokenMap] of tokensByChain) {
+      const client = this.getClient(chainId);
+      const tokens = Array.from(tokenMap.values());
+      if (tokens.length === 0) continue;
+
+      const hasMulticall = chainMulticallSupport.get(chainId) ?? false;
+      const metadataCalls: { token: Address; field: 'symbol' | 'name' }[] = [];
+      const requests: MulticallRequest[] = [];
+
+      for (const token of tokens) {
+        metadataCalls.push({ token, field: 'symbol' });
+        requests.push({
+          address: token,
+          abi: ERC20_METADATA_ABI as Abi,
+          functionName: 'symbol',
+          args: [],
+          estimatedGas: MULTICALL_ERC20_METADATA_CALL_GAS,
+        });
+
+        metadataCalls.push({ token, field: 'name' });
+        requests.push({
+          address: token,
+          abi: ERC20_METADATA_ABI as Abi,
+          functionName: 'name',
+          args: [],
+          estimatedGas: MULTICALL_ERC20_METADATA_CALL_GAS,
+        });
+      }
+
+      let metadataResults: (string | null)[];
+      if (hasMulticall && requests.length > 0) {
+        metadataResults = await this.executeChunkedMulticall<string | null>({
+          client,
+          requests,
+          blockTag,
+          allowFailure: true,
+        });
+      } else {
+        metadataResults = Array(requests.length).fill(null);
+      }
+
+      const fallbackRequests = new Map<Address, Set<'symbol' | 'name'>>();
+
+      for (let i = 0; i < metadataCalls.length; i++) {
+        const call = metadataCalls[i];
+        const rawValue = metadataResults[i];
+        const normalized = this.normalizeTokenMetadataValue(rawValue);
+        if (normalized !== null) {
+          const key = `${chainId}_${call.token.toLowerCase()}`;
+          const existing = metadataMap.get(key) ?? ({} as { symbol?: string; name?: string });
+          if (call.field === 'symbol') {
+            existing.symbol = normalized;
+          } else {
+            existing.name = normalized;
+          }
+          metadataMap.set(key, existing);
+        } else {
+          const current = fallbackRequests.get(call.token) ?? new Set<'symbol' | 'name'>();
+          current.add(call.field);
+          fallbackRequests.set(call.token, current);
+        }
+      }
+
+      if (fallbackRequests.size > 0) {
+        for (const [token, fields] of fallbackRequests) {
+          for (const field of fields) {
+            const fallbackValue = await this.readTokenMetadataField(client, token, field, blockTag);
+            if (!fallbackValue) continue;
+            const key = `${chainId}_${token.toLowerCase()}`;
+            const existing = metadataMap.get(key) ?? ({} as { symbol?: string; name?: string });
+            if (field === 'symbol') {
+              existing.symbol = fallbackValue;
+            } else {
+              existing.name = fallbackValue;
+            }
+            metadataMap.set(key, existing);
+          }
+        }
+      }
+    }
+
+    for (const validator of validators) {
+      for (const vault of validator.vaults) {
+        const vaultKey = `${vault.chainId}_${vault.vault.toLowerCase()}`;
+        const collateral = vaultCollateralMap.get(vaultKey);
+        if (!collateral) continue;
+
+        vault.collateral = collateral;
+        const metadataKey = `${vault.chainId}_${collateral.toLowerCase()}`;
+        const metadata = metadataMap.get(metadataKey);
+        if (metadata?.symbol) {
+          vault.collateralSymbol = metadata.symbol;
+        }
+        if (metadata?.name) {
+          vault.collateralName = metadata.name;
+        }
+      }
+    }
+  }
+
+  private dedupeAddresses(addresses: readonly Address[]): Address[] {
+    const seen = new Set<string>();
+    const unique: Address[] = [];
+    for (const address of addresses) {
+      const lower = address.toLowerCase();
+      if (seen.has(lower)) continue;
+      seen.add(lower);
+      unique.push(address);
+    }
+    return unique;
+  }
+
+  private normalizeTokenMetadataValue(value: unknown): string | null {
+    if (typeof value !== 'string' || value.length === 0) {
+      return null;
+    }
+
+    if (isHex(value)) {
+      if (value === '0x') {
+        return null;
+      }
+      try {
+        const size = value.length === 66 ? 32 : undefined;
+        const decoded = hexToString(value as Hex, size ? { size } : undefined);
+        const trimmed = decoded.replace(/\u0000+$/g, '');
+        return trimmed.length > 0 ? trimmed : null;
+      } catch {
+        return null;
+      }
+    }
+
+    return value;
+  }
+
+  private async readTokenMetadataField(
+    client: PublicClient,
+    token: Address,
+    field: 'symbol' | 'name',
+    blockTag: BlockTagPreference,
+  ): Promise<string | null> {
+    try {
+      const result = await client.readContract({
+        address: token,
+        abi: ERC20_METADATA_ABI,
+        functionName: field,
+        args: [],
+        blockTag,
+      });
+      const normalized = this.normalizeTokenMetadataValue(result);
+      if (normalized !== null) {
+        return normalized;
+      }
+    } catch {
+      // Ignore read errors; fall through to null
+    }
+
+    return null;
   }
 
   private getDriverContract() {
@@ -979,6 +1330,15 @@ export class ValidatorSetDeriver {
     if (!this.cache) return;
     try {
       await this.cache.set(epoch, key, value);
+    } catch {
+      // Ignore cache errors
+    }
+  }
+
+  private async deleteFromCache(namespace: string, epoch: number, key: string): Promise<void> {
+    if (!this.cache) return;
+    try {
+      await this.cache.delete(epoch, key);
     } catch {
       // Ignore cache errors
     }
@@ -1035,20 +1395,42 @@ export class ValidatorSetDeriver {
 
     const useCache2 = finalized;
     const cacheKey = 'valset';
+    let validatorSet: ValidatorSet | null = null;
     if (useCache2) {
       const cached = await this.getFromCache('valset', targetEpoch, cacheKey);
-      if (cached) return cached;
+      if (cached && this.isValidatorSet(cached)) {
+        validatorSet = cached;
+      } else if (cached) {
+        await this.deleteFromCache('valset', targetEpoch, cacheKey);
+      }
     }
 
     const { config, epochStart } = await this.loadNetworkConfigData({ targetEpoch, finalized });
 
-    return this.buildValidatorSet({
-      targetEpoch,
-      finalized,
-      epochStart,
-      config,
-      useCache: useCache2,
-    });
+    if (!validatorSet) {
+      validatorSet = await this.buildValidatorSet({
+        targetEpoch,
+        finalized,
+        epochStart,
+        config,
+        useCache: useCache2,
+      });
+    }
+
+    let statusInfo: ValSetStatus | null = null;
+    if (config.settlements.length > 0) {
+      statusInfo = await this.updateValidatorSetStatus(
+        validatorSet,
+        config.settlements,
+        targetEpoch,
+        finalized,
+      );
+      if (useCache2 && this.canCacheValSetStatus(statusInfo)) {
+        await this.setToCache('valset', targetEpoch, cacheKey, validatorSet);
+      }
+    }
+
+    return validatorSet;
   }
 
   /**
@@ -1298,9 +1680,11 @@ export class ValidatorSetDeriver {
     const finalized = options?.finalized ?? true;
     const { targetEpoch } = await this.resolveEpoch(options?.epoch, finalized);
 
+    const config = await this.getNetworkConfig(targetEpoch, finalized);
+    const mode = this.getVerificationMode(config);
+
     let settlements = options?.settlements;
     if (!settlements) {
-      const config = await this.getNetworkConfig(targetEpoch, finalized);
       settlements = config.settlements;
     }
 
@@ -1319,8 +1703,10 @@ export class ValidatorSetDeriver {
             epoch: targetEpoch,
             settlement: detail.settlement,
             finalized,
+            mode,
           },
           { overall: status, detail },
+          finalized && status.status === 'committed',
         );
       }
 
@@ -1339,13 +1725,14 @@ export class ValidatorSetDeriver {
       epoch: number;
       settlement: CrossChainAddress;
       finalized: boolean;
+      mode: AggregatorMode;
     },
     statusContext?: {
       overall?: ValSetStatus | null;
       detail?: SettlementValSetStatus | null;
     },
   ): Promise<ValSetLogEvent | null> {
-    const { epoch, settlement, finalized } = params;
+    const { epoch, settlement, finalized, mode } = params;
     const blockTag = blockTagFromFinality(finalized);
     const state = this.getOrCreateValSetEventsState(blockTag, settlement);
 
@@ -1358,8 +1745,10 @@ export class ValidatorSetDeriver {
       return existing.event;
     }
 
+    let allowEventCache = statusContext?.overall?.status === 'committed';
+
     const event = await fetchValSetLogEvent(
-      { epoch, settlement, finalized },
+      { epoch, settlement, finalized, mode },
       (tag, addr) => this.getOrCreateValSetEventsState(tag, addr),
       this.cache,
       (ep, fin) => this.getValSetStatus(ep, fin),
@@ -1381,9 +1770,10 @@ export class ValidatorSetDeriver {
       (chainId) => this.getClient(chainId),
       EPOCH_EVENT_BLOCK_BUFFER,
       statusContext,
+      allowEventCache,
     );
 
-    if (event) {
+    if (event && allowEventCache) {
       const settlementSuffix = `${settlement.chainId}_${settlement.address.toLowerCase()}`;
       await this.setToCache('valset_event', epoch, settlementSuffix, event);
     }
