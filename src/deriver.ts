@@ -479,9 +479,7 @@ export class ValidatorSetDeriver {
     if (finalized && this.canCacheValidatorSet(validatorSet)) {
       const requiredTagsSorted = [...config.requiredKeyTags].sort((a, b) => a - b);
       const oppositeMode =
-        verificationMode === AGGREGATOR_MODE.SIMPLE
-          ? AGGREGATOR_MODE.ZK
-          : AGGREGATOR_MODE.SIMPLE;
+        verificationMode === AGGREGATOR_MODE.SIMPLE ? AGGREGATOR_MODE.ZK : AGGREGATOR_MODE.SIMPLE;
       if (oppositeMode !== verificationMode) {
         await this.loadAggregatorsExtraData({
           mode: oppositeMode,
@@ -509,7 +507,6 @@ export class ValidatorSetDeriver {
                 mode: verificationMode,
               },
               { overall: valsetStatusData, detail },
-              finalized && !!valsetStatusData && valsetStatusData.status === 'committed',
             );
           }
           events.push({
@@ -658,10 +655,7 @@ export class ValidatorSetDeriver {
   ): value is { hash: Hex; data: AggregatorExtraDataEntry[] } {
     if (!value || typeof value !== 'object') return false;
     const candidate = value as { hash?: unknown; data?: unknown };
-    return (
-      typeof candidate.hash === 'string' &&
-      Array.isArray(candidate.data)
-    );
+    return typeof candidate.hash === 'string' && Array.isArray(candidate.data);
   }
 
   private async updateValidatorSetStatus(
@@ -1023,9 +1017,9 @@ export class ValidatorSetDeriver {
       });
 
       if (allowFailure) {
-        const chunkResult = (rawResult as readonly { status: 'success' | 'failure'; result: unknown }[]).map(
-          (entry) => (entry.status === 'success' ? (entry.result as T) : (null as T)),
-        );
+        const chunkResult = (
+          rawResult as readonly { status: 'success' | 'failure'; result: unknown }[]
+        ).map((entry) => (entry.status === 'success' ? (entry.result as T) : (null as T)));
         results.push(...chunkResult);
       } else {
         const chunkResult = rawResult as unknown as T[];
@@ -1114,7 +1108,10 @@ export class ValidatorSetDeriver {
         const collateral = collateralResults[i];
         if (!collateral || collateral.toLowerCase() === ZERO_ADDRESS) continue;
 
-        vaultCollateralMap.set(`${chainId}_${uniqueVaults[i].toLowerCase()}`, collateral as Address);
+        vaultCollateralMap.set(
+          `${chainId}_${uniqueVaults[i].toLowerCase()}`,
+          collateral as Address,
+        );
         tokensForChain.set(collateral.toLowerCase(), collateral as Address);
       }
     }
@@ -1706,7 +1703,6 @@ export class ValidatorSetDeriver {
             mode,
           },
           { overall: status, detail },
-          finalized && status.status === 'committed',
         );
       }
 
@@ -1745,7 +1741,7 @@ export class ValidatorSetDeriver {
       return existing.event;
     }
 
-    let allowEventCache = statusContext?.overall?.status === 'committed';
+    const allowEventCache = statusContext?.overall?.status === 'committed';
 
     const event = await fetchValSetLogEvent(
       { epoch, settlement, finalized, mode },

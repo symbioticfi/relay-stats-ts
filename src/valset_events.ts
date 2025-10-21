@@ -498,7 +498,8 @@ export const loadValSetEvent = async (
     allowCache: boolean;
   },
 ): Promise<ValSetLogEvent | null> => {
-  const { epoch, settlement, finalized, startTimestamp, endTimestamp, buffer, mode, allowCache } = params;
+  const { epoch, settlement, finalized, startTimestamp, endTimestamp, buffer, mode, allowCache } =
+    params;
   const blockTag = blockTagFromFinality(finalized);
 
   const existing = state.map.get(epoch) ?? null;
