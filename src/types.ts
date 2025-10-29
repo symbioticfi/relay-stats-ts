@@ -50,10 +50,38 @@ export interface ValidatorKey {
   payload: Hex;
 }
 
+export interface ValSetQuorumProofSimpleSigner {
+  key: Hex;
+  votingPower: bigint;
+}
+
+export interface ValSetQuorumProofSimple {
+  mode: 'simple';
+  aggregatedSignature: Hex;
+  aggregatedPublicKey: Hex;
+  signers: ValSetQuorumProofSimpleSigner[];
+  nonSignerIndices: number[];
+  rawProof: Hex;
+}
+
+export interface ValSetQuorumProofZk {
+  mode: 'zk';
+  proof: Hex[];
+  commitments: Hex[];
+  commitmentPok: Hex[];
+  signersVotingPower: bigint;
+  rawProof: Hex;
+}
+
+export type ValSetQuorumProof = ValSetQuorumProofSimple | ValSetQuorumProofZk;
+
 export interface ValidatorVault {
   vault: Address;
   votingPower: bigint;
   chainId: number;
+  collateral?: Address;
+  collateralSymbol?: string;
+  collateralName?: string;
 }
 
 export interface Validator {
@@ -74,6 +102,7 @@ export interface ValidatorSet {
   totalVotingPower: bigint;
   status: 'committed' | 'pending' | 'missing';
   integrity: 'valid' | 'invalid';
+  extraData: ValSetExtraData[];
 }
 
 export interface ValidatorSetHeader {
@@ -84,6 +113,45 @@ export interface ValidatorSetHeader {
   quorumThreshold: bigint;
   totalVotingPower: bigint;
   validatorsSszMRoot: Hex;
+}
+
+// Aggregator extra data entry (key/value are bytes32)
+export interface AggregatorExtraDataEntry {
+  key: Hex;
+  value: Hex;
+}
+
+export type ValSetExtraData = AggregatorExtraDataEntry;
+
+export type ValSetEventKind = 'genesis' | 'commit';
+
+export interface ValSetLogEvent {
+  kind: ValSetEventKind;
+  header: ValidatorSetHeader;
+  extraData: ValSetExtraData[];
+  blockNumber: bigint | null;
+  blockTimestamp: number | null;
+  transactionHash: Hex | null;
+  quorumProof?: ValSetQuorumProof | null;
+}
+
+export interface SettlementValSetStatus {
+  settlement: CrossChainAddress;
+  committed: boolean;
+  headerHash: Hex | null;
+  lastCommittedEpoch: number | null;
+}
+
+export interface SettlementValSetLog {
+  settlement: CrossChainAddress;
+  committed: boolean;
+  event: ValSetLogEvent | null;
+}
+
+export interface ValSetStatus {
+  status: 'committed' | 'pending' | 'missing';
+  integrity: 'valid' | 'invalid';
+  settlements: SettlementValSetStatus[];
 }
 
 export interface OperatorVotingPower {
@@ -117,20 +185,26 @@ export interface NetworkData {
   eip712Data: Eip712Domain;
 }
 
-// Aggregator extra data entry (key/value are bytes32)
-export interface AggregatorExtraDataEntry {
-  key: Hex;
-  value: Hex;
+export interface EpochData {
+  epoch: number;
+  finalized: boolean;
+  epochStart: number;
+  config: NetworkConfig;
+  validatorSet: ValidatorSet;
+  networkData?: NetworkData;
+  settlementStatuses?: SettlementValSetStatus[];
+  valSetEvents?: SettlementValSetLog[];
+  aggregatorsExtraData?: AggregatorExtraDataEntry[];
 }
 
 export interface CacheInterface {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  get(key: string): Promise<any | null>;
+  get(epoch: number, key: string): Promise<any | null>;
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  set(key: string, value: any): Promise<void>;
+  set(epoch: number, key: string, value: any): Promise<void>;
 
-  delete(key: string): Promise<void>;
+  delete(epoch: number, key: string): Promise<void>;
 
-  clear(): Promise<void>;
+  clear(epoch: number): Promise<void>;
 }

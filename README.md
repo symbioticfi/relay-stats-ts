@@ -60,26 +60,99 @@ extraData.forEach(({ key, value }) => console.log(key, value));
 
 Pass `'simple'` for simple mode or provide custom `keyTags` when you need non-default key selection.
 
+### Single-call epoch snapshot
+
+`getEpochData` pulls the validator set, network metadata, optional log event, and aggregator extras in one request:
+
+```ts
+const snapshot = await deriver.getEpochData({
+  epoch,
+  finalized: true,
+  includeNetworkData: true,
+  includeValSetEvent: true,
+});
+
+console.log(snapshot.validatorSet.status);
+console.log(snapshot.networkData?.address);
+console.log(snapshot.aggregatorsExtraData?.length ?? 0);
+console.log(snapshot.settlementStatuses?.map((s) => ({
+  chainId: s.settlement.chainId,
+  committed: s.committed,
+})));
+console.log(snapshot.valSetEvents?.map((entry) => ({
+  chainId: entry.settlement.chainId,
+  hasEvent: Boolean(entry.event),
+})));
+```
+
+Aggregator extra data returned by `getEpochData` automatically uses the network configuration's `verificationType` (simple vs zk). Provide `aggregatorKeyTags` only when you need to override the defaults coming from the config.
+
+See `displayEpochSnapshot` in [`examples/example.ts`](examples/example.ts) for a full walkthrough that prints the combined response.
+
+### Validator set events
+
+Validator-set commitment events expose on-chain metadata (block number, block timestamp, transaction hash) together with the parsed header. The deriver only attempts to load the event once the validator set status is `committed`, so pending epochs return `null` without additional RPC calls:
+
+```ts
+const events = await deriver.getValSetLogEvents({ epoch, finalized: true });
+
+events.forEach(({ settlement, committed, event }) => {
+  console.log(`Settlement ${settlement.address} committed=${committed}`);
+  if (event) {
+    console.log('  kind:', event.kind);
+    console.log('  blockTimestamp:', event.blockTimestamp);
+    console.log('  txHash:', event.transactionHash);
+  }
+});
+```
+
+When you only need status data without retrieving logs, call:
+
+```ts
+const settlements = await deriver.getValSetSettlementStatuses({ epoch });
+settlements.forEach(({ settlement, committed }) => {
+  console.log(`Settlement ${settlement.address} committed=${committed}`);
+});
+```
+
+`getEpochData` now mirrors this behaviour: when `includeValSetEvent` is `true`, the response includes `settlementStatuses` alongside `valSetEvents`, containing entries for every settlement and returning logs only for those that are already committed.
+
+Internally the library batches settlement reads with `Multicall3` when available and caches finalized results to avoid redundant log scans.
+
 ## Caching
 
-`ValidatorSetDeriver` accepts any cache that conforms to the `CacheInterface` and only persists finalized data. Implement the interface to integrate Redis, in-memory caches, or other stores:
+`ValidatorSetDeriver` accepts any cache that conforms to the `CacheInterface` and only persists finalized data. Cache entries are namespaced by epoch and a string key, allowing multiple values per epoch. Implement the interface to integrate Redis, in-memory caches, or other stores:
 
 ```ts
 import type { CacheInterface } from '@symbioticfi/relay-stats-ts';
 
 class MapCache implements CacheInterface {
-  private map = new Map<string, unknown>();
-  async get(key: string) {
-    return this.map.get(key) ?? null;
+  private buckets = new Map<number, Map<string, unknown>>();
+
+  async get(epoch: number, key: string) {
+    return this.buckets.get(epoch)?.get(key) ?? null;
   }
-  async set(key: string, value: unknown) {
-    this.map.set(key, value);
+
+  async set(epoch: number, key: string, value: unknown) {
+    let bucket = this.buckets.get(epoch);
+    if (!bucket) {
+      bucket = new Map();
+      this.buckets.set(epoch, bucket);
+    }
+    bucket.set(key, value);
   }
-  async delete(key: string) {
-    this.map.delete(key);
+
+  async delete(epoch: number, key: string) {
+    const bucket = this.buckets.get(epoch);
+    if (!bucket) return;
+    bucket.delete(key);
+    if (bucket.size === 0) {
+      this.buckets.delete(epoch);
+    }
   }
-  async clear() {
-    this.map.clear();
+
+  async clear(epoch: number) {
+    this.buckets.delete(epoch);
   }
 }
 
@@ -92,12 +165,16 @@ const deriver = await ValidatorSetDeriver.create({
 
 ## API Highlights
 
-- `ValidatorSetDeriver.create(config)` – initialize clients and validate required chains.
-- `getValidatorSet(epoch?, finalized = true)` – fetches validator sets with settlement status.
-- `getNetworkConfig(epoch?, finalized = true)` – retrieves driver configuration for an epoch.
-- `getNetworkData(settlement?, finalized = true)` – loads the EIP-712 domain from a settlement contract.
-- `buildSimpleExtraData` / `buildZkExtraData` – standalone helpers for constructing aggregator payloads.
-- SSZ helpers (`serializeValidatorSet`, `getValidatorSetRoot`, etc.) exported via `index.ts`.
+All exports live under `@symbioticfi/relay-stats-ts`. Key entry points:
+
+- `ValidatorSetDeriver.create(config)` – initialize clients (one per chain) and validate required RPC coverage.
+- `getEpochData({ epoch?, finalized?, includeNetworkData?, includeValSetEvent?, aggregatorKeyTags? })` – single snapshot with validator set, optional network metadata, aggregator extras, settlement statuses, and per-settlement log events.
+- `getValidatorSet(epoch?, finalized?)` / `getNetworkConfig(epoch?, finalized?)` / `getNetworkData(settlement?, finalized?)` – granular primitives backing the combined call.
+- `getValSetSettlementStatuses({ epoch?, settlements?, finalized? })` – commitment + header-hash status per settlement.
+- `getValSetLogEvents({ epoch?, settlements?, finalized? })` – settlement-indexed log results (only fetches logs for committed settlements).
+- `getAggregatorsExtraData(mode, keyTags?, finalized?, epoch?)` – manual access to simple/zk aggregator payloads when you need custom modes or tags.
+- Utilities for downstream consumers: `getTotalActiveVotingPower`, `getValidatorSetHeader`, `abiEncodeValidatorSetHeader`, `hashValidatorSetHeader`, `getValidatorSetHeaderHash`.
+- Low-level helpers are re-exported: `buildSimpleExtraData`, `buildZkExtraData`, and the SSZ encoding utilities (`serializeValidatorSet`, `getValidatorSetRoot`, etc.).
 
 Refer to `src/types.ts` for full type definitions.
 
@@ -113,8 +190,6 @@ npm run lint
 npm run format:check
 npm run build
 ```
-
-Use `npm run ci` locally to execute the same build + lint + formatting checks that run in CI.
 
 ## License
 

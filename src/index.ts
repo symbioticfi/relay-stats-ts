@@ -2,6 +2,7 @@ export * from './types.js';
 export * from './deriver.js';
 export * from './constants.js';
 export * from './extra_data.js';
+export * from './validator_set.js';
 export type { ValidatorSetHeader } from './types.js';
 export {
   SszKey,
@@ -21,4 +22,6 @@ export {
   bytesToAddress,
   hexToBytes,
   bytesToHex,
-} from './ssz.js';
+} from './encoding.js';
+export { compressAggregatedG1, compressRawG1, parseKeyToPoint } from './bls_bn254.js';
+export { FIELD_MODULUS, mimcBn254Hash } from './mimc_bn254.js';

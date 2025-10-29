@@ -1,17 +1,18 @@
 import { encodeAbiParameters, keccak256, type Hex } from 'viem';
-import type { AggregatorExtraDataEntry, ValidatorSet, KeyTag } from './types.js';
+import type { AggregatorExtraDataEntry, KeyTag, ValidatorSet } from './types.js';
 import { KeyType, getKeyType } from './types.js';
 import { compressAggregatedG1, compressRawG1, parseKeyToPoint } from './bls_bn254.js';
-import { hexToBytes } from './ssz.js';
-import { EXTRA_NAME, EXTRA_PREFIX } from './constants.js';
 import { FIELD_MODULUS, mimcBn254Hash } from './mimc_bn254.js';
+import { hexToBytes } from './encoding.js';
+import { EXTRA_NAME, EXTRA_PREFIX } from './constants.js';
+import { bigintToBytes32, bytesToBigint, bytesToLimbs, sortHexAsc } from './utils.js';
 
-function keccakName(name: string): Hex {
-  const hex = ('0x' + Buffer.from(name, 'utf8').toString('hex')) as Hex;
+const keccakName = (name: string): Hex => {
+  const hex = `0x${Buffer.from(name, 'utf8').toString('hex')}` as Hex;
   return keccak256(hex);
-}
+};
 
-function computeExtraDataKey(verificationType: number, name: string): Hex {
+const computeExtraDataKey = (verificationType: number, name: string): Hex => {
   const encoded = encodeAbiParameters(
     [
       { name: 'vt', type: 'uint32' },
@@ -20,9 +21,9 @@ function computeExtraDataKey(verificationType: number, name: string): Hex {
     [verificationType, keccakName(name)],
   );
   return keccak256(encoded);
-}
+};
 
-function computeExtraDataKeyTagged(verificationType: number, tag: number, name: string): Hex {
+const computeExtraDataKeyTagged = (verificationType: number, tag: number, name: string): Hex => {
   const prefix = keccakName(EXTRA_PREFIX.TAG);
   const nameHash = keccakName(name);
   const encoded = encodeAbiParameters(
@@ -35,139 +36,121 @@ function computeExtraDataKeyTagged(verificationType: number, tag: number, name: 
     [verificationType, prefix, tag, nameHash],
   );
   return keccak256(encoded);
-}
-
-function bigintToBytes32(value: bigint): Uint8Array {
-  const hex = value.toString(16).padStart(64, '0');
-  return Uint8Array.from(Buffer.from(hex, 'hex'));
-}
-
-function bytesToBigint(bytes: Uint8Array): bigint {
-  let hex = '';
-  for (const b of bytes) hex += b.toString(16).padStart(2, '0');
-  return BigInt('0x' + hex);
-}
-
-function bytesToLimbs(bytes: Uint8Array): bigint[] {
-  const limbs: bigint[] = [];
-  for (let i = 24; i >= 0; i -= 8) {
-    const chunk = bytes.slice(i, i + 8);
-    limbs.push(bytesToBigint(chunk));
-  }
-  return limbs;
-}
-
-function modField(value: bigint): bigint {
-  const r = value % FIELD_MODULUS;
-  return r >= 0n ? r : r + FIELD_MODULUS;
-}
-
-/**
- * Filter key tags to only include BLS BN254 keys for aggregation
- * Only BLS BN254 keys should be aggregated and extra dataed
- */
-function filterBlsBn254Tags(keyTags: KeyTag[]): KeyTag[] {
-  const needToAggregateTags: KeyTag[] = [];
-  for (const tag of keyTags) {
-    if (getKeyType(tag) === KeyType.KeyTypeBlsBn254) {
-      needToAggregateTags.push(tag);
-    }
-  }
-  return needToAggregateTags;
-}
-
-function collectValidatorsForSimple(
-  vset: ValidatorSet,
-  tag: number,
-): {
-  validatorTuples: { keySerialized: Hex; votingPower: bigint }[];
-  aggregatedKeyCompressed: Hex;
-} {
-  const tuples: { keySerialized: Hex; votingPower: bigint }[] = [];
-  const activeKeys: Hex[] = [] as Hex[];
-  for (const val of vset.validators) {
-    if (!val.isActive) {
-      continue;
-    }
-
-    let foundKey: Hex | null = null;
-    for (const k of val.keys) {
-      if (k.tag === tag) {
-        foundKey = k.payload;
-        break;
-      }
-    }
-
-    if (!foundKey) {
-      throw new Error(`Failed to find key by keyTag ${tag} for validator ${val.operator}`);
-    }
-
-    const keySerialized = compressRawG1(foundKey);
-    tuples.push({ keySerialized, votingPower: val.votingPower });
-    activeKeys.push(foundKey);
-  }
-  tuples.sort((a, b) =>
-    a.keySerialized < b.keySerialized ? -1 : a.keySerialized > b.keySerialized ? 1 : 0,
-  );
-  const aggregatedKeyCompressed = compressAggregatedG1(activeKeys);
-  return { validatorTuples: tuples, aggregatedKeyCompressed };
-}
-
-type ZkValidatorTuple = {
-  keySerialized: Hex;
-  votingPower: bigint;
-  x: bigint;
-  y: bigint;
 };
 
-function collectValidatorsForZk(vset: ValidatorSet, tag: number): ZkValidatorTuple[] {
-  const tuples: ZkValidatorTuple[] = [];
+const modField = (value: bigint): bigint => {
+  const remainder = value % FIELD_MODULUS;
+  return remainder >= 0n ? remainder : remainder + FIELD_MODULUS;
+};
 
-  for (const val of vset.validators) {
-    if (!val.isActive) continue;
+const filterBlsBn254Tags = (keyTags: readonly KeyTag[]): readonly KeyTag[] => {
+  const tags: KeyTag[] = [];
+  for (const tag of keyTags) {
+    if (getKeyType(tag) === KeyType.KeyTypeBlsBn254) {
+      tags.push(tag);
+    }
+  }
+  return tags;
+};
 
-    let foundKey: Hex | null = null;
-    for (const k of val.keys) {
-      if (k.tag === tag) {
-        foundKey = k.payload;
+type ValidatorTuple = { keySerialized: Hex; votingPower: bigint };
+
+const collectValidatorsForSimple = (
+  validatorSet: ValidatorSet,
+  tag: number,
+): { validatorTuples: ValidatorTuple[]; aggregatedKeyCompressed: Hex } => {
+  const tuples: ValidatorTuple[] = [];
+  const activeKeys: Hex[] = [];
+
+  for (const validator of validatorSet.validators) {
+    if (!validator.isActive) continue;
+
+    let payload: Hex | null = null;
+    for (const key of validator.keys) {
+      if (key.tag === tag) {
+        payload = key.payload;
         break;
       }
     }
 
-    if (!foundKey) {
-      throw new Error(`Failed to find key by keyTag ${tag} for validator ${val.operator}`);
-    }
-
-    const point = parseKeyToPoint(foundKey);
-    if (point === null) {
-      throw new Error(`Validator ${val.operator} key resolves to point at infinity`);
+    if (!payload) {
+      throw new Error(`Failed to find key by keyTag ${tag} for validator ${validator.operator}`);
     }
 
     tuples.push({
-      keySerialized: compressRawG1(foundKey),
-      votingPower: val.votingPower,
+      keySerialized: compressRawG1(payload),
+      votingPower: validator.votingPower,
+    });
+    activeKeys.push(payload);
+  }
+
+  tuples.sort((left, right) =>
+    left.keySerialized < right.keySerialized
+      ? -1
+      : left.keySerialized > right.keySerialized
+        ? 1
+        : 0,
+  );
+
+  return {
+    validatorTuples: tuples,
+    aggregatedKeyCompressed: compressAggregatedG1(activeKeys),
+  };
+};
+
+type ZkValidatorTuple = ValidatorTuple & { x: bigint; y: bigint };
+
+const collectValidatorsForZk = (
+  validatorSet: ValidatorSet,
+  tag: number,
+): readonly ZkValidatorTuple[] => {
+  const tuples: ZkValidatorTuple[] = [];
+
+  for (const validator of validatorSet.validators) {
+    if (!validator.isActive) continue;
+
+    let payload: Hex | null = null;
+    for (const key of validator.keys) {
+      if (key.tag === tag) {
+        payload = key.payload;
+        break;
+      }
+    }
+
+    if (!payload) {
+      throw new Error(`Failed to find key by keyTag ${tag} for validator ${validator.operator}`);
+    }
+
+    const point = parseKeyToPoint(payload);
+    if (point === null) {
+      throw new Error(`Validator ${validator.operator} key resolves to point at infinity`);
+    }
+
+    tuples.push({
+      keySerialized: compressRawG1(payload),
+      votingPower: validator.votingPower,
       x: modField(point.x),
       y: modField(point.y),
     });
   }
 
-  tuples.sort((a, b) => {
-    if (a.x === b.x && a.y === b.y) return 0;
-    const leftBeforeRight = a.x < b.x || a.y < b.y;
+  tuples.sort((left, right) => {
+    if (left.x === right.x && left.y === right.y) return 0;
+    const leftBeforeRight = left.x < right.x || left.y < right.y;
     return leftBeforeRight ? -1 : 1;
   });
 
   return tuples;
-}
+};
 
-function keccakValidatorsData(tuples: { keySerialized: Hex; votingPower: bigint }[]): Hex {
+const keccakValidatorsData = (tuples: readonly ValidatorTuple[]): Hex => {
   const encoded = encodeAbiParameters(
     [
       {
         name: 'validators',
         type: 'tuple[]',
         components: [
-          { name: 'keySerialized', type: 'bytes32' },
+          { name: 'keySerialized', type: 'bytes' },
           { name: 'VotingPower', type: 'uint256' },
         ],
       },
@@ -181,14 +164,13 @@ function keccakValidatorsData(tuples: { keySerialized: Hex; votingPower: bigint 
   );
 
   const encodedBytes = hexToBytes(encoded);
-  const withoutOffset = encodedBytes.slice(32);
-  // encodeAbiParameters returns offsets in the first 32 bytes; the Go code hashes the tail as raw bytes
-  return keccak256(withoutOffset);
-}
+  const tail = encodedBytes.slice(32);
+  return keccak256(tail);
+};
 
-async function mimcHashValidators(tuples: ZkValidatorTuple[]): Promise<Hex> {
+const mimcHashValidators = async (tuples: readonly ZkValidatorTuple[]): Promise<Hex> => {
   if (tuples.length === 0) {
-    return ('0x' + '0'.repeat(64)) as Hex;
+    return `0x${'0'.repeat(64)}` as Hex;
   }
 
   let state = 0n;
@@ -196,57 +178,67 @@ async function mimcHashValidators(tuples: ZkValidatorTuple[]): Promise<Hex> {
   for (const validator of tuples) {
     if (validator.x === 0n && validator.y === 0n) break;
 
-    const xLimbs = bytesToLimbs(bigintToBytes32(validator.x));
-    const yLimbs = bytesToLimbs(bigintToBytes32(validator.y));
-    const vpField = bytesToBigint(bigintToBytes32(validator.votingPower));
+    const xLimbs = bytesToLimbs(bigintToBytes32(validator.x), 8);
+    const yLimbs = bytesToLimbs(bigintToBytes32(validator.y), 8);
+    const votingPowerField = bytesToBigint(bigintToBytes32(validator.votingPower));
 
     for (const limb of [...xLimbs, ...yLimbs]) {
       state = modField(mimcBn254Hash(state, limb));
     }
 
-    state = modField(mimcBn254Hash(state, vpField));
+    state = modField(mimcBn254Hash(state, votingPowerField));
   }
 
   const finalHash = modField(state);
-  const asBytes = bigintToBytes32(finalHash);
-  return ('0x' + Buffer.from(asBytes).toString('hex')) as Hex;
-}
+  const bytes = bigintToBytes32(finalHash);
+  return `0x${Buffer.from(bytes).toString('hex')}` as Hex;
+};
 
-export function buildSimpleExtraData(
-  vset: ValidatorSet,
-  keyTags: number[],
-): AggregatorExtraDataEntry[] {
+export const buildSimpleExtraData = (
+  validatorSet: ValidatorSet,
+  keyTags: readonly number[],
+): AggregatorExtraDataEntry[] => {
   const entries: AggregatorExtraDataEntry[] = [];
   const filteredTags = filterBlsBn254Tags(keyTags);
 
   for (const tag of filteredTags) {
-    const { validatorTuples, aggregatedKeyCompressed } = collectValidatorsForSimple(vset, tag);
+    const { validatorTuples, aggregatedKeyCompressed } = collectValidatorsForSimple(
+      validatorSet,
+      tag,
+    );
     if (validatorTuples.length === 0) continue;
-    const validatorsKeccak = keccakValidatorsData(validatorTuples);
-    const setHashKey = computeExtraDataKeyTagged(1, tag, EXTRA_NAME.SIMPLE_VALIDATORS_KECCAK);
-    entries.push({ key: setHashKey, value: validatorsKeccak });
-    const aggKeyKey = computeExtraDataKeyTagged(1, tag, EXTRA_NAME.SIMPLE_AGG_G1);
-    entries.push({ key: aggKeyKey, value: aggregatedKeyCompressed });
-  }
-  return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-}
 
-export async function buildZkExtraData(
-  vset: ValidatorSet,
-  keyTags: number[],
-): Promise<AggregatorExtraDataEntry[]> {
+    const validatorsKeccak = keccakValidatorsData(validatorTuples);
+    const validatorKey = computeExtraDataKeyTagged(1, tag, EXTRA_NAME.SIMPLE_VALIDATORS_KECCAK);
+    entries.push({ key: validatorKey, value: validatorsKeccak });
+
+    const aggregatedKey = computeExtraDataKeyTagged(1, tag, EXTRA_NAME.SIMPLE_AGG_G1);
+    entries.push({ key: aggregatedKey, value: aggregatedKeyCompressed });
+  }
+
+  return sortHexAsc(entries);
+};
+
+export const buildZkExtraData = async (
+  validatorSet: ValidatorSet,
+  keyTags: readonly number[],
+): Promise<AggregatorExtraDataEntry[]> => {
   const entries: AggregatorExtraDataEntry[] = [];
-  const totalActive = vset.validators.filter((v) => v.isActive).length;
+  const totalActive = validatorSet.validators.filter((validator) => validator.isActive).length;
+
   const totalActiveKey = computeExtraDataKey(0, EXTRA_NAME.ZK_TOTAL_ACTIVE);
-  const totalActiveBytes32 = ('0x' + totalActive.toString(16).padStart(64, '0')) as Hex;
-  entries.push({ key: totalActiveKey, value: totalActiveBytes32 });
+  const totalActiveBytes = `0x${totalActive.toString(16).padStart(64, '0')}` as Hex;
+  entries.push({ key: totalActiveKey, value: totalActiveBytes });
+
   const filteredTags = filterBlsBn254Tags(keyTags);
   for (const tag of filteredTags) {
-    const tuples = collectValidatorsForZk(vset, tag);
+    const tuples = collectValidatorsForZk(validatorSet, tag);
     if (tuples.length === 0) continue;
+
     const mimcAccumulator = await mimcHashValidators(tuples);
-    const validatorSetHashKey = computeExtraDataKeyTagged(0, tag, EXTRA_NAME.ZK_VALIDATORS_MIMC);
-    entries.push({ key: validatorSetHashKey, value: mimcAccumulator });
+    const validatorsKey = computeExtraDataKeyTagged(0, tag, EXTRA_NAME.ZK_VALIDATORS_MIMC);
+    entries.push({ key: validatorsKey, value: mimcAccumulator });
   }
-  return entries.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-}
+
+  return sortHexAsc(entries);
+};
