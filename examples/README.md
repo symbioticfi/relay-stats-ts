@@ -11,8 +11,8 @@ This example shows how to derive validator-set statistics with the `@symbioticfi
 Run these commands from the repository root:
 
 ```bash
-npm install
-npm run build
+pnpm install
+pnpm run build
 ```
 
 The example depends on the build artifacts in `dist/`, so repeat this step whenever you change the root library code.
@@ -22,7 +22,7 @@ Now move into the example workspace:
 
 ```bash
 cd examples
-npm install
+pnpm install
 ```
 
 This installs the example's local dependencies, including the freshly built package from the parent directory.
@@ -50,13 +50,13 @@ Choose one of the following approaches:
 
 - **Direct TypeScript execution (recommended on Node 18/20):**
   ```bash
-  npm start
+  pnpm start
   ```
   This uses `ts-node`'s ESM loader to run `example.ts` without a build step.
 
 - **Compiled output (works on any recent Node version, including 21+):**
   ```bash
-  npm run build
+  pnpm run build
   node dist/example.js
   ```
   This path avoids loader warnings and matches what will be published to npm.

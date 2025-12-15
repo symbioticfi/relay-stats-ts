@@ -1,6 +1,7 @@
 {
     "name": "@symbioticfi/relay-stats-ts",
     "version": "0.2.0-alpha.3",
+    "packageManager": "pnpm@9.14.2",
     "description": "TypeScript library for deriving validator sets from Symbiotic network contracts",
     "type": "module",
     "main": "dist/index.js",
@@ -17,8 +18,8 @@
         "format": "prettier --write \"src/**/*.ts\"",
         "format:check": "prettier --check \"src/**/*.ts\"",
         "precommit": "lint-staged",
-        "ci": "npm run build && npm run lint && npm run format:check",
-        "rebuild": "npm run build && cd examples && npm install --force && npm run build"
+        "ci": "pnpm run build && pnpm run lint && pnpm run format:check",
+        "rebuild": "pnpm run build && cd examples && pnpm install --force && pnpm run build"
     },
     "keywords": [
         "symbiotic",

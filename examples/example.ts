@@ -1,20 +1,22 @@
 // example/example.ts
-import { ValidatorSetDeriver, AGGREGATOR_MODE } from '@symbioticfi/relay-stats-ts';
-import type {
-  ValidatorSet,
-  NetworkData,
-  AggregatorExtraDataEntry,
-  NetworkConfig,
-  ValSetLogEvent,
-  ValSetExtraData,
+import {
+  ValidatorSetDeriver,
+  AGGREGATOR_MODE,
   ValSetEventKind,
-  CrossChainAddress,
+  type ValidatorSet,
+  type NetworkData,
+  type AggregatorExtraDataEntry,
+  type NetworkConfig,
+  type ValSetLogEvent,
+  type ValSetExtraData,
+  type ValSetEventKindType,
+  type CrossChainAddress,
 } from '@symbioticfi/relay-stats-ts';
-import type { Address, Hex } from 'viem';
+import { createPublicClient, http, type Address, type Hex } from 'viem';
 import { fileURLToPath } from 'url';
 
 const DEFAULT_RPC_URLS = ['http://localhost:8545', 'http://localhost:8546'];
-const DEFAULT_DRIVER_ADDRESS: Address = '0xE1A1629C2a0447eA1e787527329805B234ac605C';
+const DEFAULT_DRIVER_ADDRESS: Address = '0x43C27243F96591892976FFf886511807B65a33d5';
 const DEFAULT_DRIVER_CHAIN_ID = 31337;
 
 const rpcUrls = parseRpcUrls(process.env.RELAY_STATS_RPC_URLS);
@@ -63,15 +65,16 @@ const ui = {
       ui.info('RPC URLs', rpcUrls.map((url) => shortUrl(url)).join(', '));
       ui.info('Driver Chain ID', driverChainId);
       ui.info('Driver Address', driverAddress);
+      await verifyRpcUrls(rpcUrls, driverChainId);
 
       const deriver = await ValidatorSetDeriver.create({
-          rpcUrls,
-          driverAddress: {
-            chainId: driverChainId,
-            address: driverAddress,
-          },
-          cache: null,
-        });
+        rpcUrls,
+        driverAddress: {
+          chainId: driverChainId,
+          address: driverAddress,
+        },
+        cache: null,
+      });
 
       ui.success('Deriver initialized successfully!');
       ui.blank();
@@ -419,9 +422,7 @@ const ui = {
     }
     const parsed = Number.parseInt(raw, 10);
     if (Number.isNaN(parsed)) {
-      console.warn(
-        `Invalid RELAY_STATS_DRIVER_CHAIN_ID="${raw}". Falling back to ${DEFAULT_DRIVER_CHAIN_ID}.`,
-      );
+      ui.warn(`Invalid RELAY_STATS_DRIVER_CHAIN_ID="${raw}". Falling back to ${DEFAULT_DRIVER_CHAIN_ID}.`);
       return DEFAULT_DRIVER_CHAIN_ID;
     }
     return parsed;
@@ -433,12 +434,25 @@ const ui = {
     }
     const trimmed = raw.trim();
     if (!/^0x[0-9a-fA-F]{40}$/.test(trimmed)) {
-      console.warn(
-        `Invalid RELAY_STATS_DRIVER_ADDRESS="${trimmed}". Falling back to ${DEFAULT_DRIVER_ADDRESS}.`,
-      );
+      ui.warn(`Invalid RELAY_STATS_DRIVER_ADDRESS="${trimmed}". Falling back to ${DEFAULT_DRIVER_ADDRESS}.`);
       return DEFAULT_DRIVER_ADDRESS;
     }
     return trimmed as Address;
+  }
+
+  async function verifyRpcUrls(urls: string[], expectedChainId: number) {
+    ui.section('RPC Health Check');
+    for (const url of urls) {
+      try {
+        const client = createPublicClient({ transport: http(url) });
+        const cid = await client.getChainId();
+        ui.success(`RPC ${url} reachable (chainId ${cid})`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ui.error(`RPC ${url} unreachable: ${message}`);
+      }
+    }
+    ui.blank();
   }
 
   /**
@@ -753,15 +767,10 @@ const ui = {
     return error instanceof Error ? error.message : String(error);
   }
 
-  function formatValSetEventKind(kind: ValSetEventKind): string {
-    switch (kind) {
-      case 'genesis':
-        return 'SetGenesis';
-      case 'commit':
-        return 'CommitValSetHeader';
-      default:
-        return kind;
-    }
+  function formatValSetEventKind(kind: ValSetEventKindType): string {
+    if (kind === ValSetEventKind.Genesis) return 'SetGenesis';
+    if (kind === ValSetEventKind.Commit) return 'CommitValSetHeader';
+    return String(kind);
   }
 
   // Run the example (ESM-friendly main check)

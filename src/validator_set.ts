@@ -6,17 +6,19 @@ import type {
   ValidatorSet,
   ValidatorSetHeader,
   NetworkConfig,
-} from './types.js';
+} from './types/index.js';
 import type { Address } from 'viem';
-import { sszTreeRoot } from './encoding.js';
+import { sszTreeRoot } from './utils/ssz.js';
 import { SSZ_MAX_VALIDATORS, SSZ_MAX_VAULTS } from './constants.js';
 
+/** @notice Sum voting power of active validators only. */
 export const totalActiveVotingPower = (validatorSet: ValidatorSet): bigint =>
   validatorSet.validators.reduce(
     (sum, validator) => sum + (validator.isActive ? validator.votingPower : 0n),
     0n,
   );
 
+/** @notice Build a validator-set header from a full set. */
 export const createValidatorSetHeader = (validatorSet: ValidatorSet): ValidatorSetHeader => ({
   version: validatorSet.version,
   requiredKeyTag: validatorSet.requiredKeyTag,
@@ -27,6 +29,7 @@ export const createValidatorSetHeader = (validatorSet: ValidatorSet): ValidatorS
   validatorsSszMRoot: sszTreeRoot(validatorSet),
 });
 
+/** @notice ABI encode a validator-set header (matching settlement contract tuple). */
 export const encodeValidatorSetHeader = (header: ValidatorSetHeader): Hex =>
   encodeAbiParameters(
     [
@@ -49,9 +52,11 @@ export const encodeValidatorSetHeader = (header: ValidatorSetHeader): Hex =>
     ],
   ) as Hex;
 
+/** @notice Keccak256 hash of the encoded validator-set header. */
 export const hashValidatorSetHeader = (header: ValidatorSetHeader): Hex =>
   keccak256(encodeValidatorSetHeader(header));
 
+/** @notice Hash of a full validator set (header derived from content). */
 export const hashValidatorSet = (validatorSet: ValidatorSet): Hex =>
   hashValidatorSetHeader(createValidatorSetHeader(validatorSet));
 

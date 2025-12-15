@@ -13,8 +13,8 @@ TypeScript utilities for deriving Symbiotic validator-set data from on-chain con
 ```bash
 git clone https://github.com/symbioticfi/relay-stats-ts.git
 cd relay-stats-ts
-npm install            # install dependencies
-npm run build          # compile TypeScript to dist/
+pnpm install            # install dependencies
+pnpm run build          # compile TypeScript to dist/
 ```
 
 You can now import from the `src/` or freshly built `dist/` folders locally, or run the example script (see [`examples/README.md`](examples/README.md)).
@@ -22,9 +22,7 @@ You can now import from the `src/` or freshly built `dist/` folders locally, or 
 ### From npm
 
 ```bash
-npm install @symbioticfi/relay-stats-ts
-# or
-yarn add @symbioticfi/relay-stats-ts
+pnpm add @symbioticfi/relay-stats-ts
 ```
 
 Requires Node.js 18 or newer.
@@ -185,10 +183,10 @@ See [`examples/README.md`](examples/README.md) for step-by-step instructions on 
 ## Development
 
 ```bash
-npm install
-npm run lint
-npm run format:check
-npm run build
+pnpm install
+pnpm run lint
+pnpm run format:check
+pnpm run build
 ```
 
 ## License

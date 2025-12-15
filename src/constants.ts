@@ -8,6 +8,15 @@ export const MULTICALL_VOTING_CALL_GAS = 130_000n;
 export const MULTICALL_KEYS_CALL_GAS = 95_000n;
 export const MULTICALL_VAULT_COLLATERAL_CALL_GAS = 80_000n;
 export const MULTICALL_ERC20_METADATA_CALL_GAS = 90_000n;
+export const EVENT_SCAN_RANGE = 100n;
+
+export const CACHE_NAMESPACE = {
+  CONFIG: 'config',
+  VALSET: 'valset',
+  VALSET_STATUS: 'valset_status',
+  AGGREGATOR_EXTRA: 'aggregator_extra',
+  VALSET_EVENT: 'valset_event',
+} as const;
 
 export const AGGREGATOR_MODE = {
   SIMPLE: 'simple',
