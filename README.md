@@ -35,11 +35,11 @@ Create a deriver that talks to the ValSet driver and fetch the current validator
 import { ValidatorSetDeriver } from '@symbioticfi/relay-stats-ts';
 
 const deriver = await ValidatorSetDeriver.create({
-  rpcUrls: ['https://ethereum.publicnode.com'],
-  driverAddress: {
-    chainId: 1,
-    address: '0xDriverAddress',
-  },
+    rpcUrls: ['https://ethereum.publicnode.com'],
+    driverAddress: {
+        chainId: 1,
+        address: '0xDriverAddress',
+    },
 });
 
 const validatorSet = await deriver.getCurrentValidatorSet();
@@ -64,23 +64,27 @@ Pass `'simple'` for simple mode or provide custom `keyTags` when you need non-de
 
 ```ts
 const snapshot = await deriver.getEpochData({
-  epoch,
-  finalized: true,
-  includeNetworkData: true,
-  includeValSetEvent: true,
+    epoch,
+    finalized: true,
+    includeNetworkData: true,
+    includeValSetEvent: true,
 });
 
 console.log(snapshot.validatorSet.status);
 console.log(snapshot.networkData?.address);
 console.log(snapshot.aggregatorsExtraData?.length ?? 0);
-console.log(snapshot.settlementStatuses?.map((s) => ({
-  chainId: s.settlement.chainId,
-  committed: s.committed,
-})));
-console.log(snapshot.valSetEvents?.map((entry) => ({
-  chainId: entry.settlement.chainId,
-  hasEvent: Boolean(entry.event),
-})));
+console.log(
+    snapshot.settlementStatuses?.map(s => ({
+        chainId: s.settlement.chainId,
+        committed: s.committed,
+    }))
+);
+console.log(
+    snapshot.valSetEvents?.map(entry => ({
+        chainId: entry.settlement.chainId,
+        hasEvent: Boolean(entry.event),
+    }))
+);
 ```
 
 Aggregator extra data returned by `getEpochData` automatically uses the network configuration's `verificationType` (simple vs zk). Provide `aggregatorKeyTags` only when you need to override the defaults coming from the config.
@@ -95,12 +99,12 @@ Validator-set commitment events expose on-chain metadata (block number, block ti
 const events = await deriver.getValSetLogEvents({ epoch, finalized: true });
 
 events.forEach(({ settlement, committed, event }) => {
-  console.log(`Settlement ${settlement.address} committed=${committed}`);
-  if (event) {
-    console.log('  kind:', event.kind);
-    console.log('  blockTimestamp:', event.blockTimestamp);
-    console.log('  txHash:', event.transactionHash);
-  }
+    console.log(`Settlement ${settlement.address} committed=${committed}`);
+    if (event) {
+        console.log('  kind:', event.kind);
+        console.log('  blockTimestamp:', event.blockTimestamp);
+        console.log('  txHash:', event.transactionHash);
+    }
 });
 ```
 
@@ -109,7 +113,7 @@ When you only need status data without retrieving logs, call:
 ```ts
 const settlements = await deriver.getValSetSettlementStatuses({ epoch });
 settlements.forEach(({ settlement, committed }) => {
-  console.log(`Settlement ${settlement.address} committed=${committed}`);
+    console.log(`Settlement ${settlement.address} committed=${committed}`);
 });
 ```
 
@@ -184,9 +188,7 @@ See [`examples/README.md`](examples/README.md) for step-by-step instructions on 
 
 ```bash
 pnpm install
-pnpm run lint
-pnpm run format:check
-pnpm run build
+pnpm run check
 ```
 
 ## License

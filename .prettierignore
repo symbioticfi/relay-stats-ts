@@ -1,0 +1,68 @@
+# Dependencies
+node_modules/
+pnpm-lock.yaml
+ponder-env.d.ts
+.pnpm/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+
+# Database files
+:memory:/
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated files
+generated/
+*.generated.*
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Archive files
+*.tar.gz
+*.zip
+*.rar
+
+# API specs (often auto-generated)
+specs/
+*.yaml
+*.yml
+
+# Large data files
+*.json
+resp.json
+
+# Ponder specific
+/.ponder/
+
+# Env files
+.env*.local
+
+# Temporary files
+*.tmp
+*.temp

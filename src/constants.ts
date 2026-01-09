@@ -12,28 +12,28 @@ export const EVENT_SCAN_RANGE = 100n;
 export const EPOCH_EVENT_BLOCK_BUFFER = 16n;
 
 export const CACHE_NAMESPACE = {
-  CONFIG: 'config',
-  VALSET: 'valset',
-  VALSET_STATUS: 'valset_status',
-  AGGREGATOR_EXTRA: 'aggregator_extra',
-  VALSET_EVENT: 'valset_event',
-  MULTICALL_SUPPORT: 'multicall_support',
+    CONFIG: 'config',
+    VALSET: 'valset',
+    VALSET_STATUS: 'valset_status',
+    AGGREGATOR_EXTRA: 'aggregator_extra',
+    VALSET_EVENT: 'valset_event',
+    MULTICALL_SUPPORT: 'multicall_support',
 } as const;
 
 export const AGGREGATOR_MODE = {
-  SIMPLE: 'simple',
-  ZK: 'zk',
+    SIMPLE: 'simple',
+    ZK: 'zk',
 } as const;
 export type AggregatorMode = (typeof AGGREGATOR_MODE)[keyof typeof AGGREGATOR_MODE];
 
 export const EXTRA_NAME = {
-  SIMPLE_VALIDATORS_KECCAK: 'validatorSetHashKeccak256',
-  SIMPLE_AGG_G1: 'aggPublicKeyG1',
-  SIMPLE_TOTAL_VOTING_POWER: 'totalVotingPower',
-  ZK_TOTAL_ACTIVE: 'totalActiveValidators',
-  ZK_VALIDATORS_MIMC: 'validatorSetHashMimc',
+    SIMPLE_VALIDATORS_KECCAK: 'validatorSetHashKeccak256',
+    SIMPLE_AGG_G1: 'aggPublicKeyG1',
+    SIMPLE_TOTAL_VOTING_POWER: 'totalVotingPower',
+    ZK_TOTAL_ACTIVE: 'totalActiveValidators',
+    ZK_VALIDATORS_MIMC: 'validatorSetHashMimc',
 } as const;
 
 export const EXTRA_PREFIX = {
-  TAG: 'keyTag.',
+    TAG: 'keyTag.',
 } as const;

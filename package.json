@@ -13,12 +13,16 @@
     "scripts": {
         "build": "tsc",
         "clean": "rm -rf dist",
-        "lint": "eslint .",
+        "lint": "pnpm run lint:check",
+        "lint:check": "eslint .",
         "lint:fix": "eslint . --fix",
-        "format": "prettier --write \"src/**/*.ts\"",
-        "format:check": "prettier --check \"src/**/*.ts\"",
+        "format": "pnpm run format:fix",
+        "format:check": "prettier --check .",
+        "format:fix": "prettier --write .",
+        "check": "pnpm run lint:check && pnpm run format:check && pnpm run build",
+        "fix": "pnpm run lint:fix && pnpm run format:fix",
         "precommit": "lint-staged",
-        "ci": "pnpm run build && pnpm run lint && pnpm run format:check",
+        "ci": "pnpm run build && pnpm run lint:check && pnpm run format:check",
         "rebuild": "pnpm run build && cd examples && pnpm install --force && pnpm run build"
     },
     "keywords": [
@@ -51,16 +55,15 @@
         "viem": "^2.36.0"
     },
     "devDependencies": {
+        "@eslint/js": "^9.39.1",
         "@types/node": "^20.0.0",
-        "@typescript-eslint/eslint-plugin": "^6.0.0",
-        "@typescript-eslint/parser": "^6.0.0",
-        "eslint": "^8.57.1",
-        "eslint-config-prettier": "^9.0.0",
+        "@typescript-eslint/eslint-plugin": "^8.47.0",
+        "@typescript-eslint/parser": "^8.47.0",
+        "eslint": "^9.39.1",
         "globals": "^16.4.0",
         "husky": "^8.0.3",
-        "jiti": "^2.5.1",
         "lint-staged": "^15.0.0",
-        "prettier": "^3.0.0",
+        "prettier": "^3.6.2",
         "ts-node": "^10.9.1",
         "typescript": "^5.0.0",
         "typescript-eslint": "^8.44.0"
