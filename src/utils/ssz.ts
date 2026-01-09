@@ -118,8 +118,6 @@ export const deserializeValidatorSet = (bytes: Uint8Array): ISszValidatorSet =>
 export const getValidatorSetRoot = (validatorSet: ISszValidatorSet): Uint8Array =>
     SszValidatorSet.hashTreeRoot(validatorSet);
 
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-/* eslint-disable @typescript-eslint/no-unused-vars */
 /** @notice Placeholder: SSZ Merkle proof not implemented for current version. */
 export const proveValidator = (
     _validatorSet: ISszValidatorSet,
@@ -127,7 +125,6 @@ export const proveValidator = (
 ): Uint8Array[] => {
     throw new Error('proveValidator not implemented for current SSZ version');
 };
-/* eslint-enable @typescript-eslint/no-unused-vars */
 
 /** @notice Keccak hash of validator key payload. */
 export const keyPayloadHash = (key: ValidatorKey): Uint8Array => {
