@@ -38,29 +38,3 @@ export const bytesToLimbs = (bytes: Uint8Array, limbSize: number): readonly bigi
 /** @notice Sort hex-keyed entries ascending by key. */
 export const sortHexAsc = <T extends { key: Hex }>(items: readonly T[]): T[] =>
   [...items].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
-
-/** @notice Clamp a bigint within [lowerBound, upperBound] with buffer applied. */
-export const clampWithinBuffer = (
-  value: bigint,
-  buffer: bigint,
-  lowerBound: bigint,
-  upperBound: bigint,
-): bigint => {
-  const min = value > buffer ? value - buffer : lowerBound;
-  const max = value + buffer > upperBound ? upperBound : value + buffer;
-  return max < min ? min : max;
-};
-
-/** @notice Compute buffered block range bounded by chain tip. */
-export const toBlockRange = (
-  fromEstimate: bigint,
-  toEstimate: bigint,
-  buffer: bigint,
-  highestBlock: bigint,
-): { fromBlock: bigint; toBlock: bigint } => {
-  const bufferedFrom = fromEstimate > buffer ? fromEstimate - buffer : 0n;
-  let bufferedTo = toEstimate + buffer;
-  if (bufferedTo > highestBlock) bufferedTo = highestBlock;
-  if (bufferedTo < bufferedFrom) bufferedTo = bufferedFrom;
-  return { fromBlock: bufferedFrom, toBlock: bufferedTo };
-};

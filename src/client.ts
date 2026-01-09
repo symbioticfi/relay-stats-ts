@@ -58,6 +58,18 @@ type DriverReadArgsMap = {
   getEpochIndex: [number];
 };
 
+export const DRIVER_METHOD = {
+  CURRENT_EPOCH: 'getCurrentEpoch',
+  CURRENT_EPOCH_DURATION: 'getCurrentEpochDuration',
+  CURRENT_EPOCH_START: 'getCurrentEpochStart',
+  NEXT_EPOCH: 'getNextEpoch',
+  NEXT_EPOCH_DURATION: 'getNextEpochDuration',
+  NEXT_EPOCH_START: 'getNextEpochStart',
+  EPOCH_START: 'getEpochStart',
+  EPOCH_DURATION: 'getEpochDuration',
+  EPOCH_INDEX: 'getEpochIndex',
+} as const;
+
 /** @notice Build a map of PublicClient instances keyed by chainId from RPC URLs. */
 export const buildClientMap = async (
   rpcUrls: readonly string[],
@@ -124,13 +136,19 @@ const getDriverContract = (client: PublicClient, driver: CrossChainAddress) =>
     client,
   });
 
-export const readDriverNumber = async <M extends DriverReadMethod>(
-  client: PublicClient,
-  driver: CrossChainAddress,
-  method: M,
-  blockTag: BlockTagPreference,
-  args?: DriverReadArgsMap[M],
-): Promise<number> => {
+export const readDriverNumber = async <M extends DriverReadMethod>({
+  client,
+  driver,
+  method,
+  blockTag,
+  args,
+}: {
+  client: PublicClient;
+  driver: CrossChainAddress;
+  method: M;
+  blockTag: BlockTagPreference;
+  args?: DriverReadArgsMap[M];
+}): Promise<number> => {
   const driverContract = getDriverContract(client, driver);
   const reader = (
     driverContract.read as unknown as Record<
@@ -194,16 +212,6 @@ export const executeChunkedMulticall = async <T>({
 
   const results: T[] = [];
 
-  const assertSuccess = <U>(
-    entry: { status: 'success' | 'failure'; result: unknown },
-    label: string,
-  ): U => {
-    if (entry.status !== 'success') {
-      throw new Error(`${label} failed`);
-    }
-    return entry.result as U;
-  };
-
   for (const chunk of chunks) {
     let rawResult: readonly unknown[];
     try {
@@ -220,8 +228,7 @@ export const executeChunkedMulticall = async <T>({
       })) as readonly { status: 'success' | 'failure'; result: unknown }[];
     } catch (error) {
       const first = chunk[0];
-      const label =
-        first && typeof first.functionName === 'string'
+      const label = first
           ? `${first.functionName} @ ${first.address}`
           : 'multicall';
       const message = error instanceof Error ? error.message : String(error);

@@ -22,6 +22,7 @@ import {
   AGGREGATOR_MODE,
   AggregatorMode,
   CACHE_NAMESPACE,
+  EPOCH_EVENT_BLOCK_BUFFER,
 } from './constants.js';
 const logger = console;
 import { blockTagFromFinality, type BlockTagPreference } from './utils/core.js';
@@ -42,6 +43,7 @@ import {
   retrieveValSetEvent as fetchValSetLogEvent,
 } from './settlement.js';
 import {
+  DRIVER_METHOD,
   buildClientMap,
   getClientOrThrow,
   multicallExists as hasMulticall,
@@ -62,9 +64,15 @@ import {
   type RawDriverConfig,
   type CachedNetworkConfigEntry,
 } from './config.js';
-import { cacheDelete, cacheGet, cacheGetTyped, cacheSet } from './cache.js';
-
-const EPOCH_EVENT_BLOCK_BUFFER = 16n;
+import {
+  cacheDelete,
+  cacheGet,
+  cacheGetTyped,
+  cacheSet,
+  buildSettlementKey,
+  buildSettlementStatusKey,
+  pruneMap,
+} from './cache.js';
 
 export interface ValidatorSetDeriverConfig {
   rpcUrls: string[];
@@ -92,8 +100,9 @@ export class ValidatorSetDeriver {
   private readonly maxSavedEpochs: number;
   private readonly initializedPromise: Promise<void>;
   private readonly rpcUrls: readonly string[];
-  private readonly valsetEventsState = new Map<string, ValSetEventsState>();
+  private readonly valsetEventsState = new Map<string, ValSetEventsState>(); // ancorCache
   private readonly multicallSupport = new Map<string, boolean>();
+  private readonly settlementBlockAnchors = new Map<string, { epoch: number; block: bigint; blocksPerEpoch: bigint }>();
 
   constructor(config: ValidatorSetDeriverConfig) {
     this.driverAddress = config.driverAddress;
@@ -110,6 +119,20 @@ export class ValidatorSetDeriver {
     finalized: boolean = true,
   ): Promise<NetworkData> {
     await this.ensureInitialized();
+    const cacheKey = settlement
+      ? buildSettlementKey(settlement)
+      : this.driverAddress.address.toLowerCase();
+    const networkCacheKey = `network_${cacheKey}`;
+    if (finalized && this.cache) {
+      const cached = await cacheGetTyped<NetworkData>(
+        this.cache,
+        CACHE_NAMESPACE.VALSET,
+        0,
+        networkCacheKey,
+        (value): value is NetworkData => Boolean((value as NetworkData)?.eip712Data),
+      );
+      if (cached) return cached;
+    }
     const blockTag = blockTagFromFinality(finalized);
     const driverClient = this.getClient(this.driverAddress.chainId);
 
@@ -137,11 +160,15 @@ export class ValidatorSetDeriver {
       blockTag,
     });
 
-    return {
+    const result: NetworkData = {
       address: networkAddress as Address,
       subnetwork: subnetwork as Hex,
       eip712Data,
     };
+    if (finalized && this.cache) {
+      await cacheSet(this.cache, CACHE_NAMESPACE.VALSET, 0, networkCacheKey, result);
+    }
+    return result;
   }
 
   /** @notice Build aggregator extraData entries for simple or zk verification modes. */
@@ -231,7 +258,7 @@ export class ValidatorSetDeriver {
       );
       settlementStatuses = valsetStatusData.settlements;
       if (useCache && valsetStatusData && this.canCacheValSetStatus(valsetStatusData)) {
-        const statusKey = this.settlementsCacheKey(config.settlements);
+        const statusKey = buildSettlementStatusKey(config.settlements);
         await cacheSet(
           this.cache,
           CACHE_NAMESPACE.VALSET_STATUS,
@@ -253,20 +280,6 @@ export class ValidatorSetDeriver {
       validatorSet,
       finalized,
     });
-
-    if (finalized && this.canCacheValidatorSet(validatorSet)) {
-      const requiredTagsSorted = [...config.requiredKeyTags].sort((a, b) => a - b);
-      const oppositeMode =
-        verificationMode === AGGREGATOR_MODE.SIMPLE ? AGGREGATOR_MODE.ZK : AGGREGATOR_MODE.SIMPLE;
-      if (oppositeMode !== verificationMode) {
-        await this.loadAggregatorsExtraData({
-          mode: oppositeMode,
-          tags: requiredTagsSorted,
-          validatorSet,
-          finalized,
-        });
-      }
-    }
 
     let valSetEvents: SettlementValSetLog[] | undefined;
     if (includeValSetEvent && includeSettlementStatus) {
@@ -367,7 +380,7 @@ export class ValidatorSetDeriver {
   ): Promise<{ currentEpoch: number; targetEpoch: number }> {
     const currentEpoch = await this.getCurrentEpoch(finalized);
     const targetEpoch = epoch ?? currentEpoch;
-    if (targetEpoch > currentEpoch) {
+    if (targetEpoch > currentEpoch) { // TODO: do we need that validation? if epoch is defined then we do redundant call
       throw new Error(
         `Requested epoch ${targetEpoch} is not yet available on-chain (latest is ${currentEpoch}).`,
       );
@@ -394,11 +407,7 @@ export class ValidatorSetDeriver {
   private isValidatorSet(value: unknown): value is ValidatorSet {
     if (!value || typeof value !== 'object') return false;
     const candidate = value as ValidatorSet;
-    return (
-      typeof candidate.epoch === 'number' &&
-      typeof candidate.status === 'string' &&
-      Array.isArray(candidate.validators)
-    );
+    return Array.isArray(candidate.validators);
   }
 
   private canCacheValSetStatus(status: ValSetStatus): boolean {
@@ -474,27 +483,16 @@ export class ValidatorSetDeriver {
     )) as RawDriverConfig;
 
     const config = mapDriverConfig(rawConfig);
-  const entry: CachedNetworkConfigEntry = {
-    config,
-    epochStart,
-  };
+    const entry: CachedNetworkConfigEntry = {
+      config,
+      epochStart,
+    };
 
-  if (useCache) {
-    await cacheSet(this.cache, CACHE_NAMESPACE.CONFIG, targetEpoch, cacheKey, entry);
-  }
+    if (useCache) {
+      await cacheSet(this.cache, CACHE_NAMESPACE.CONFIG, targetEpoch, cacheKey, entry);
+    }
 
-  return entry;
-}
-
-  private settlementCacheKey(settlement: CrossChainAddress): string {
-    return `${settlement.chainId}_${settlement.address.toLowerCase()}`;
-  }
-
-  private settlementsCacheKey(settlements: readonly CrossChainAddress[]): string {
-    return settlements
-      .map((s) => this.settlementCacheKey(s))
-      .sort()
-      .join('|');
+    return entry;
   }
 
   private async loadValSetStatus(params: {
@@ -504,7 +502,7 @@ export class ValidatorSetDeriver {
   }): Promise<ValSetStatus> {
     const { settlements, epoch, finalized } = params;
     const useCache = finalized;
-    const key = this.settlementsCacheKey(settlements);
+    const key = buildSettlementStatusKey(settlements);
 
     if (useCache) {
       const cached = await cacheGet(this.cache, CACHE_NAMESPACE.VALSET_STATUS, epoch, key);
@@ -662,12 +660,30 @@ export class ValidatorSetDeriver {
 
   private async multicallExists(chainId: number, blockTag: BlockTagPreference): Promise<boolean> {
     const key = `${chainId}:${blockTag}`;
+    const persisted = await cacheGetTyped<boolean>(
+      this.cache,
+      CACHE_NAMESPACE.MULTICALL_SUPPORT,
+      0,
+      key,
+      (value): value is boolean => typeof value === 'boolean',
+    );
+    if (persisted !== null) {
+      this.multicallSupport.set(key, persisted);
+      return persisted;
+    }
+
     const cached = this.multicallSupport.get(key);
     if (cached !== undefined) return cached;
 
     const client = this.getClient(chainId);
     const exists = await hasMulticall(client, blockTag);
     this.multicallSupport.set(key, exists);
+    await cacheSet(this.cache, CACHE_NAMESPACE.MULTICALL_SUPPORT, 0, key, exists);
+    if (this.multicallSupport.size > this.maxSavedEpochs && this.maxSavedEpochs > 0) {
+      const [first] = this.multicallSupport.keys();
+      this.multicallSupport.delete(first);
+      await cacheDelete(this.cache, CACHE_NAMESPACE.MULTICALL_SUPPORT, 0, first);
+    }
     return exists;
   }
 
@@ -679,52 +695,56 @@ export class ValidatorSetDeriver {
     await this.ensureInitialized();
     const blockTag = blockTagFromFinality(finalized);
     const client = this.getClient(this.driverAddress.chainId);
-    return readDriverNumber(client, this.driverAddress, method, blockTag, args);
+    return readDriverNumber({
+      client,
+      driver: this.driverAddress,
+      method,
+      blockTag,
+      args,
+    });
   }
-
-  // withPreferredBlockTag removed; use explicit { blockTag: blockTagFromFinality(...) }
 
   // === Epoch/config ===
   async getCurrentEpoch(finalized: boolean = true): Promise<number> {
-    return this.readDriverNumber('getCurrentEpoch', finalized);
+    return this.readDriverNumber(DRIVER_METHOD.CURRENT_EPOCH, finalized);
   }
 
   async getCurrentEpochDuration(finalized: boolean = true): Promise<number> {
-    return this.readDriverNumber('getCurrentEpochDuration', finalized);
+    return this.readDriverNumber(DRIVER_METHOD.CURRENT_EPOCH_DURATION, finalized);
   }
 
   async getCurrentEpochStart(finalized: boolean = true): Promise<number> {
-    return this.readDriverNumber('getCurrentEpochStart', finalized);
+    return this.readDriverNumber(DRIVER_METHOD.CURRENT_EPOCH_START, finalized);
   }
 
   /** @notice Get the next epoch index (scheduled). */
   async getNextEpoch(finalized: boolean = true): Promise<number> {
-    return this.readDriverNumber('getNextEpoch', finalized);
+    return this.readDriverNumber(DRIVER_METHOD.NEXT_EPOCH, finalized);
   }
 
   /** @notice Get the duration of the next epoch (seconds). */
   async getNextEpochDuration(finalized: boolean = true): Promise<number> {
-    return this.readDriverNumber('getNextEpochDuration', finalized);
+    return this.readDriverNumber(DRIVER_METHOD.NEXT_EPOCH_DURATION, finalized);
   }
 
   /** @notice Get the start timestamp of the next epoch. */
   async getNextEpochStart(finalized: boolean = true): Promise<number> {
-    return this.readDriverNumber('getNextEpochStart', finalized);
+    return this.readDriverNumber(DRIVER_METHOD.NEXT_EPOCH_START, finalized);
   }
 
   /** @notice Get the start timestamp of a specific epoch. */
   async getEpochStart(epoch: number, finalized: boolean = true): Promise<number> {
-    return this.readDriverNumber('getEpochStart', finalized, [Number(epoch)]);
+    return this.readDriverNumber(DRIVER_METHOD.EPOCH_START, finalized, [Number(epoch)]);
   }
 
   /** @notice Get the duration of a specific epoch (seconds). */
   async getEpochDuration(epoch: number, finalized: boolean = true): Promise<number> {
-    return this.readDriverNumber('getEpochDuration', finalized, [Number(epoch)]);
+    return this.readDriverNumber(DRIVER_METHOD.EPOCH_DURATION, finalized, [Number(epoch)]);
   }
 
   /** @notice Resolve epoch index for a given timestamp. */
   async getEpochIndex(timestamp: number, finalized: boolean = true): Promise<number> {
-    return this.readDriverNumber('getEpochIndex', finalized, [Number(timestamp)]);
+    return this.readDriverNumber(DRIVER_METHOD.EPOCH_INDEX, finalized, [Number(timestamp)]);
   }
 
   async getNetworkConfig(epoch?: number, finalized: boolean = true): Promise<NetworkConfig> {
@@ -782,7 +802,7 @@ export class ValidatorSetDeriver {
         finalized,
       );
       if (useCache && statusInfo && this.canCacheValSetStatus(statusInfo)) {
-        const statusKey = this.settlementsCacheKey(config.settlements);
+        const statusKey = buildSettlementStatusKey(config.settlements);
         await cacheSet(
           this.cache,
           CACHE_NAMESPACE.VALSET_STATUS,
@@ -857,16 +877,16 @@ export class ValidatorSetDeriver {
       logger.warn(
         `Failed to fetch voting powers for provider ${provider.address} on chain ${provider.chainId} at blockTag=${String(blockTag)} timestamp=${timestampSeconds.toString()} (multicall=${useMulticall}): ${message}`,
       );
-      if (useMulticall) {
-        return fetchVotingPowers({
-          client,
-          provider,
-          blockTag,
-          timestamp: timestampSeconds,
-          useMulticall: true,
-        });
-      }
-      throw error;
+      if (!useMulticall) throw error;
+      const fallback = await fetchVotingPowers({
+        client,
+        provider,
+        blockTag,
+        timestamp: timestampSeconds,
+        useMulticall: false,
+      });
+      this.multicallSupport.set(`${provider.chainId}:${blockTag}`, false);
+      return fallback;
     }
   }
 
@@ -894,11 +914,13 @@ export class ValidatorSetDeriver {
     epoch: number,
     finalized: boolean,
   ) {
-    return this.loadValSetStatus({
+    const status = await this.loadValSetStatus({
       settlements,
       epoch,
       finalized,
     });
+    this.pruneValSetEventsState();
+    return status;
   }
 
   private getOrCreateValSetEventsState(
@@ -908,18 +930,21 @@ export class ValidatorSetDeriver {
     return getOrCreateValSetEventsState(this.valsetEventsState, blockTag, settlement);
   }
 
-  private async selectSettlementForEvent(
-    epoch: number,
-    finalized: boolean,
-    settlement?: CrossChainAddress,
-  ): Promise<CrossChainAddress> {
-    if (settlement) return settlement;
+  private pruneValSetEventsState(): void {
+    if (this.maxSavedEpochs <= 0) return;
+    for (const state of this.valsetEventsState.values()) {
+      const epochs = Array.from(state.map.keys()).sort((a, b) => a - b);
+      if (epochs.length <= this.maxSavedEpochs) continue;
+      const excess = epochs.length - this.maxSavedEpochs;
+      for (let i = 0; i < excess; i++) {
+        state.map.delete(epochs[i]);
+      }
+    }
 
-    const config = await this.getNetworkConfig(epoch, finalized);
-    return selectDefaultSettlement(config.settlements);
+    pruneMap(this.settlementBlockAnchors, this.maxSavedEpochs);
   }
 
-  async getValSetStatus(epoch: number, finalized: boolean = true): Promise<ValSetStatus> {
+  public async getValSetStatus(epoch: number, finalized: boolean = true): Promise<ValSetStatus> {
     await this.ensureInitialized();
     const config = await this.getNetworkConfig(epoch, finalized);
     return this.getValsetStatus(config.settlements, epoch, finalized);
@@ -1050,6 +1075,8 @@ export class ValidatorSetDeriver {
       statusContext,
       allowEventCache,
     );
+
+    this.pruneValSetEventsState();
 
     return event;
   }

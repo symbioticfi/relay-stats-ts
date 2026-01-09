@@ -138,9 +138,8 @@ export const keyPayloadHash = (key: ValidatorKey): Uint8Array => {
 
 /** @notice Convert TS validator set into SSZ-friendly shape. */
 export const validatorSetToSszValidators = (v: ValidatorSet): ISszValidatorSet => {
-  const validatorsSorted = v.validators;
   return {
-    Validators: validatorsSorted.map((validator) => {
+    Validators: v.validators.map((validator) => {
       const keysOrdered = validator.keys;
       const vaultsSorted = [...validator.vaults].sort((a, b) =>
         a.vault.toLowerCase().localeCompare(b.vault.toLowerCase()),

@@ -10,6 +10,8 @@ import {
 import type { ValidatorSet } from '../types/index.js';
 
 /** @notice Build simple-mode aggregator extra data for BLS BN254 validators. */
+const SIMPLE_AGGREGATOR_TAG = 1;
+
 export const buildSimpleExtraData = (
   validatorSet: ValidatorSet,
   keyTags: readonly number[],
@@ -25,10 +27,18 @@ export const buildSimpleExtraData = (
     if (validatorTuples.length === 0) continue;
 
     const validatorsKeccak = keccakValidatorsData(validatorTuples);
-    const validatorKey = computeExtraDataKeyTagged(1, tag, EXTRA_NAME.SIMPLE_VALIDATORS_KECCAK);
+    const validatorKey = computeExtraDataKeyTagged(
+      SIMPLE_AGGREGATOR_TAG,
+      tag,
+      EXTRA_NAME.SIMPLE_VALIDATORS_KECCAK,
+    );
     entries.push({ key: validatorKey, value: validatorsKeccak });
 
-    const aggregatedKey = computeExtraDataKeyTagged(1, tag, EXTRA_NAME.SIMPLE_AGG_G1);
+    const aggregatedKey = computeExtraDataKeyTagged(
+      SIMPLE_AGGREGATOR_TAG,
+      tag,
+      EXTRA_NAME.SIMPLE_AGG_G1,
+    );
     entries.push({ key: aggregatedKey, value: aggregatedKeyCompressed });
   }
 

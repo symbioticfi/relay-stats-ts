@@ -7,7 +7,6 @@ import {
 import { blockTagFromFinality, type BlockTagPreference } from './utils/core.js';
 import { executeChunkedMulticall, type MulticallRequest } from './client.js';
 import type { Validator } from './types/index.js';
-import type { NetworkConfig } from './types/index.js';
 
 export type TokenMetadata = {
   address: Address;

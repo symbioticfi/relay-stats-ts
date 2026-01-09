@@ -11,6 +11,8 @@ import {
 import type { ValidatorSet } from '../types/index.js';
 
 /** @notice Build zk-mode aggregator extra data for BLS BN254 validators. */
+const ZK_AGGREGATOR_TAG = 0;
+
 export const buildZkExtraData = async (
   validatorSet: ValidatorSet,
   keyTags: readonly number[],
@@ -18,7 +20,7 @@ export const buildZkExtraData = async (
   const entries: AggregatorExtraDataEntry[] = [];
   const totalActive = validatorSet.validators.filter((validator) => validator.isActive).length;
 
-  const totalActiveKey = computeExtraDataKey(0, EXTRA_NAME.ZK_TOTAL_ACTIVE);
+  const totalActiveKey = computeExtraDataKey(ZK_AGGREGATOR_TAG, EXTRA_NAME.ZK_TOTAL_ACTIVE);
   const totalActiveBytes = `0x${totalActive.toString(16).padStart(64, '0')}` as const;
   entries.push({ key: totalActiveKey, value: totalActiveBytes });
 
@@ -28,7 +30,11 @@ export const buildZkExtraData = async (
     if (tuples.length === 0) continue;
 
     const mimcAccumulator = await mimcHashValidators(tuples);
-    const validatorsKey = computeExtraDataKeyTagged(0, tag, EXTRA_NAME.ZK_VALIDATORS_MIMC);
+    const validatorsKey = computeExtraDataKeyTagged(
+      ZK_AGGREGATOR_TAG,
+      tag,
+      EXTRA_NAME.ZK_VALIDATORS_MIMC,
+    );
     entries.push({ key: validatorsKey, value: mimcAccumulator });
   }
 

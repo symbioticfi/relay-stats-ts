@@ -8,7 +8,7 @@ import {
   bytesToHex,
 } from 'viem';
 import { SETTLEMENT_ABI } from './abis/index.js';
-import { MULTICALL3_ADDRESS, EVENT_SCAN_RANGE } from './constants.js';
+import { MULTICALL3_ADDRESS, EVENT_SCAN_RANGE, CACHE_NAMESPACE } from './constants.js';
 import {
   CrossChainAddress,
   CacheInterface,
@@ -16,6 +16,7 @@ import {
   ValSetStatus,
   ValSetLogEvent,
   ValSetEventKind,
+  ValSetEventKindType,
   ValidatorSetHeader,
   ValSetExtraData,
   ValSetQuorumProof,
@@ -24,9 +25,10 @@ import {
   ValSetQuorumProofZk,
 } from './types/index.js';
 import { blockTagFromFinality, type BlockTagPreference } from './utils/core.js';
+import { cacheDelete, cacheGet, cacheSet, buildSettlementKey } from './cache.js';
 
 export const settlementKey = (settlement: CrossChainAddress): string =>
-  `${settlement.chainId}_${settlement.address.toLowerCase()}`;
+  buildSettlementKey(settlement);
 
 export const valsetEventsStateKey = (
   blockTag: BlockTagPreference,
@@ -41,7 +43,7 @@ export const getOrCreateValSetEventsState = (
   const key = valsetEventsStateKey(blockTag, settlement);
   let state = states.get(key);
   if (!state) {
-    state = { settlement, map: new Map() };
+    state = { settlement, map: new Map(), anchorCache: new Map() };
     states.set(key, state);
   }
   return state;
@@ -69,12 +71,13 @@ export const pruneValSetEventState = async (
     const key = settlementKey(state.settlement);
     if (seen.has(key)) continue;
     seen.add(key);
-    await cache.delete(epoch, key);
+    await cacheDelete(cache, CACHE_NAMESPACE.VALSET_EVENT, epoch, key);
   }
 };
 export interface ValSetEventsState {
   settlement: CrossChainAddress;
   map: Map<number, { event: ValSetLogEvent; logIndex: number | null }>;
+  anchorCache?: Map<string, BlockAnchor>;
 }
 
 /** @notice Build a settlement contract wrapper. */
@@ -246,6 +249,111 @@ type VerificationMode = 'simple' | 'zk';
 const bytesToBigint = (bytes: Uint8Array): bigint => {
   if (bytes.length === 0) return 0n;
   return BigInt(bytesToHex(bytes));
+};
+
+type BlockAnchor = {
+  epoch: number;
+  block: bigint;
+  blocksPerEpoch: bigint;
+};
+
+const anchorCache = new Map<string, BlockAnchor>();
+
+const defaultAnchor = (): BlockAnchor => ({
+  epoch: 0,
+  block: 0n,
+  blocksPerEpoch: EVENT_SCAN_RANGE,
+});
+
+const parseAnchor = (value: unknown): BlockAnchor | null => {
+  if (!value || typeof value !== 'object') return null;
+  const anchor = value as { epoch?: unknown; block?: unknown; blocksPerEpoch?: unknown };
+  if (typeof anchor.epoch !== 'number') return null;
+  let block: bigint = 0n;
+  const blockInput = anchor.block;
+  if (typeof blockInput === 'bigint' || typeof blockInput === 'number' || typeof blockInput === 'string') {
+    block = BigInt(blockInput);
+  }
+
+  let bpe: bigint = EVENT_SCAN_RANGE;
+  const bpeInput = anchor.blocksPerEpoch;
+  if (typeof bpeInput === 'bigint' || typeof bpeInput === 'number' || typeof bpeInput === 'string') {
+    bpe = BigInt(bpeInput);
+  }
+  if (block < 0 || bpe <= 0) return null;
+  return { epoch: anchor.epoch, block, blocksPerEpoch: bpe };
+};
+
+const anchorKeyFor = (blockTag: BlockTagPreference | 'latest', settlement: CrossChainAddress): string =>
+  `${blockTag}_${settlementKey(settlement)}`;
+
+const getOrCreateAnchor = async (
+  key: string,
+  cache: CacheInterface | null,
+  inMemory: Map<string, BlockAnchor>,
+): Promise<BlockAnchor> => {
+  const cached = anchorCache.get(key) ?? inMemory.get(key);
+  if (cached) return cached;
+  const stored = await cacheGet(cache, CACHE_NAMESPACE.VALSET_EVENT, 0, key);
+  const parsed = parseAnchor(stored);
+  if (parsed) {
+    anchorCache.set(key, parsed);
+    inMemory.set(key, parsed);
+    return parsed;
+  }
+  const anchor = defaultAnchor();
+  anchorCache.set(key, anchor);
+  return anchor;
+};
+
+const storeAnchor = async (
+  key: string,
+  anchor: BlockAnchor,
+  cache: CacheInterface | null,
+  inMemory: Map<string, BlockAnchor>,
+): Promise<void> => {
+  anchorCache.set(key, anchor);
+  inMemory.set(key, anchor);
+  await cacheSet(cache, CACHE_NAMESPACE.VALSET_EVENT, 0, key, {
+    epoch: anchor.epoch,
+    block: anchor.block.toString(),
+    blocksPerEpoch: anchor.blocksPerEpoch.toString(),
+  });
+};
+
+type CachedValSetLogEvent = {
+  kind: ValSetEventKindType;
+  header: {
+    version: number;
+    requiredKeyTag: number;
+    epoch: number;
+    captureTimestamp: number;
+    quorumThreshold: string;
+    totalVotingPower: string;
+    validatorsSszMRoot: Hex;
+  };
+  extraData: ValSetExtraData[];
+  blockNumber: string | null;
+  blockTimestamp: number | null;
+  transactionHash: Hex | null;
+  quorumProof:
+    | {
+        mode: 'simple';
+        aggregatedSignature: Hex;
+        aggregatedPublicKey: Hex;
+        signers: { key: Hex; votingPower: string }[];
+        nonSignerIndices: number[];
+        rawProof: Hex;
+      }
+    | {
+        mode: 'zk';
+        proof: Hex[];
+        commitments: Hex[];
+        commitmentPok: Hex[];
+        signersVotingPower: string;
+        rawProof: Hex;
+      }
+    | null;
 };
 
 const SIMPLE_SIG_LEN = 64;
@@ -471,6 +579,119 @@ const toEventExtraData = (value: SettlementEventArgs['extraData']): ValSetExtraD
   return entries;
 };
 
+const serializeValSetLogEvent = (event: ValSetLogEvent): CachedValSetLogEvent => ({
+  kind: event.kind,
+  header: {
+    version: event.header.version,
+    requiredKeyTag: event.header.requiredKeyTag,
+    epoch: event.header.epoch,
+    captureTimestamp: event.header.captureTimestamp,
+    quorumThreshold: event.header.quorumThreshold.toString(),
+    totalVotingPower: event.header.totalVotingPower.toString(),
+    validatorsSszMRoot: event.header.validatorsSszMRoot,
+  },
+  extraData: event.extraData,
+  blockNumber: event.blockNumber !== null ? event.blockNumber.toString() : null,
+  blockTimestamp: event.blockTimestamp,
+  transactionHash: event.transactionHash,
+  quorumProof: event.quorumProof
+    ? event.quorumProof.mode === 'simple'
+      ? {
+          ...event.quorumProof,
+          signers: event.quorumProof.signers.map((signer) => ({
+            key: signer.key,
+            votingPower: signer.votingPower.toString(),
+          })),
+        }
+      : { ...event.quorumProof, signersVotingPower: event.quorumProof.signersVotingPower.toString() }
+    : null,
+});
+
+const parseCachedValSetEvent = (value: unknown): ValSetLogEvent | null => {
+  if (!value || typeof value !== 'object') return null;
+  const cached = value as CachedValSetLogEvent;
+  if (
+    cached.kind !== ValSetEventKind.Genesis &&
+    cached.kind !== ValSetEventKind.Commit
+  ) {
+    return null;
+  }
+  const header = cached.header;
+  if (
+    !header ||
+    typeof header.version !== 'number' ||
+    typeof header.requiredKeyTag !== 'number' ||
+    typeof header.epoch !== 'number' ||
+    typeof header.captureTimestamp !== 'number' ||
+    typeof header.quorumThreshold !== 'string' ||
+    typeof header.totalVotingPower !== 'string' ||
+    typeof header.validatorsSszMRoot !== 'string'
+  ) {
+    return null;
+  }
+
+  let blockNumber: bigint | null = null;
+  if (cached.blockNumber !== null) {
+    try {
+      blockNumber = BigInt(cached.blockNumber);
+    } catch {
+      return null;
+    }
+  }
+
+  let quorumProof: ValSetQuorumProof | null = null;
+  if (cached.quorumProof) {
+    if (cached.quorumProof.mode === 'simple') {
+      quorumProof = {
+        mode: 'simple',
+        aggregatedSignature: cached.quorumProof.aggregatedSignature,
+        aggregatedPublicKey: cached.quorumProof.aggregatedPublicKey,
+        signers:
+          cached.quorumProof.signers?.map((signer) => {
+            try {
+              return new ValSetQuorumProofSimpleSigner(signer.key, BigInt(signer.votingPower));
+            } catch {
+              return null;
+            }
+          }).filter((entry): entry is ValSetQuorumProofSimpleSigner => entry !== null) ?? [],
+        nonSignerIndices: cached.quorumProof.nonSignerIndices,
+        rawProof: cached.quorumProof.rawProof,
+      };
+    } else if (cached.quorumProof.mode === 'zk') {
+      try {
+        quorumProof = {
+          mode: 'zk',
+          proof: cached.quorumProof.proof,
+          commitments: cached.quorumProof.commitments,
+          commitmentPok: cached.quorumProof.commitmentPok,
+          signersVotingPower: BigInt(cached.quorumProof.signersVotingPower),
+          rawProof: cached.quorumProof.rawProof,
+        };
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  return new ValSetLogEvent(
+    cached.kind,
+    {
+      version: header.version,
+      requiredKeyTag: header.requiredKeyTag,
+      epoch: header.epoch,
+      captureTimestamp: header.captureTimestamp,
+      quorumThreshold: BigInt(header.quorumThreshold),
+      totalVotingPower: BigInt(header.totalVotingPower),
+      validatorsSszMRoot: header.validatorsSszMRoot,
+    },
+    cached.extraData ?? [],
+    blockNumber,
+    cached.blockTimestamp ?? null,
+    cached.transactionHash ?? null,
+    quorumProof,
+  );
+};
+
 const processValSetEventLog = (
   store: Map<number, { event: ValSetLogEvent; logIndex: number | null }>,
   header: RawValSetHeader,
@@ -612,6 +833,7 @@ export const retrieveValSetEvent = async (
   const { epoch, settlement, finalized, mode } = params;
   const blockTag = blockTagFromFinality(finalized);
   const state = stateFactory(blockTag, settlement);
+  const settlementCacheKey = settlementKey(settlement);
 
   const existing = state.map.get(epoch) ?? null;
   if (!finalized) return existing?.event ?? null;
@@ -620,10 +842,25 @@ export const retrieveValSetEvent = async (
     return existing.event;
   }
 
+  if (cache) {
+    const cached = await cacheGet(cache, CACHE_NAMESPACE.VALSET_EVENT, epoch, settlementCacheKey);
+    const parsed = parseCachedValSetEvent(cached);
+    if (parsed) {
+      state.map.set(epoch, { event: parsed, logIndex: null });
+      return parsed;
+    }
+  }
+
   const client = clientFactory(settlement.chainId);
   const latestBlock = await client.getBlock({ blockTag });
-  const toBlock = latestBlock.number ?? 0n;
-  const fromBlock = toBlock > EVENT_SCAN_RANGE ? toBlock - EVENT_SCAN_RANGE : 0n;
+  const latestNumber = latestBlock.number ?? 0n;
+
+  const anchorKey = anchorKeyFor(blockTag, settlement);
+  const anchor = await getOrCreateAnchor(anchorKey, cache, state.anchorCache ?? new Map());
+  const predicted = anchor.block + BigInt(epoch - anchor.epoch) * anchor.blocksPerEpoch;
+  const padding = anchor.blocksPerEpoch * 3n;
+  const toBlock = predicted + padding > latestNumber ? latestNumber : predicted + padding;
+  const fromBlock = predicted > padding ? predicted - padding : 0n;
 
   if (toBlock >= fromBlock) {
     await ingestSettlementEvents(client, settlement, state, fromBlock, toBlock, mode);
@@ -651,9 +888,21 @@ export const retrieveValSetEvent = async (
     }
   }
 
-  if (event && cache && allowCache) {
-    const cacheKey = `${settlement.chainId}_${settlement.address.toLowerCase()}`;
-    await cache.set(epoch, cacheKey, event);
+  if (event && cache) {
+    await cacheSet(cache, CACHE_NAMESPACE.VALSET_EVENT, epoch, settlementCacheKey, serializeValSetLogEvent(event));
+    if (event.blockNumber !== null) {
+      const deltaEpoch = BigInt(event.header.epoch - anchor.epoch);
+      const deltaBlocks = event.blockNumber - anchor.block;
+      const inferred =
+        deltaEpoch > 0n && deltaBlocks > 0n ? deltaBlocks / deltaEpoch : anchor.blocksPerEpoch;
+      const updated: BlockAnchor = {
+        epoch: event.header.epoch,
+        block: event.blockNumber,
+        blocksPerEpoch: inferred > 0n ? inferred : anchor.blocksPerEpoch,
+      };
+      await storeAnchor(anchorKey, updated, cache, state.anchorCache ?? new Map());
+      await storeAnchor(anchorKeyFor('latest', settlement), updated, cache, state.anchorCache ?? new Map());
+    }
   }
 
   if (!event) {

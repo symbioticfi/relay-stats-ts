@@ -55,3 +55,21 @@ export const cacheGetTyped = async <T>(
   const value = await cacheGet(cache, namespace, epoch, key);
   return value && guard(value) ? value : null;
 };
+
+export const pruneMap = <K, V>(map: Map<K, V>, maxEntries: number): void => {
+  if (maxEntries <= 0) return;
+  while (map.size > maxEntries) {
+    const first = map.keys().next();
+    if (first.done) break;
+    map.delete(first.value);
+  }
+};
+
+export const buildSettlementStatusKey = (settlements: readonly { chainId: number; address: string }[]): string =>
+  settlements
+    .map((s) => `${s.chainId}_${s.address.toLowerCase()}`)
+    .sort()
+    .join('|');
+
+export const buildSettlementKey = (settlement: { chainId: number; address: string }): string =>
+  `${settlement.chainId}_${settlement.address.toLowerCase()}`;

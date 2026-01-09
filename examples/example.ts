@@ -162,10 +162,11 @@ const ui = {
       }
 
       try {
-        currentValsetStatus = await deriver.getValSetStatus(currentEpoch);
+        const status = await deriver.getValSetStatus(currentEpoch);
+        currentValsetStatus = status;
         ui.info(
           'Validator Set Status',
-          `${getStatusEmoji(currentValsetStatus.status)} ${currentValsetStatus.status} · integrity ${currentValsetStatus.integrity}`,
+          `${getStatusEmoji(status.status)} ${status.status} · integrity ${status.integrity}`,
         );
       } catch (error) {
         ui.warn('Could not fetch validator set status');

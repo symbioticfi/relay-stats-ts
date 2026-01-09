@@ -63,15 +63,11 @@ export const isCachedNetworkConfigEntry = (
 ): value is CachedNetworkConfigEntry => {
   if (!value || typeof value !== 'object') return false;
   const entry = value as CachedNetworkConfigEntry & { epochStart?: unknown };
-  return (
-    typeof entry.epochStart === 'number' &&
-    entry.config !== undefined &&
-    typeof (entry.config as NetworkConfig).requiredHeaderKeyTag === 'number'
-  );
+  return entry.config !== undefined;
 };
 
 export const isNetworkConfigStructure = (value: unknown): value is NetworkConfig => {
-  if (!value || typeof value !== 'object' || value === null) return false;
+  if (!value || typeof value !== 'object') return false;
   const candidate = value as NetworkConfig & { keysProvider?: unknown; settlements?: unknown };
   return (
     typeof candidate.keysProvider === 'object' &&
