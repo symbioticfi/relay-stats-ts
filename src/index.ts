@@ -8,7 +8,6 @@ export * from './client.js';
 export * from './metadata.js';
 export * from './utils/index.js';
 export * from './abis/index.js';
-export type { ValidatorSetHeader } from './types/index.js';
 export {
     SszKey,
     SszVault,

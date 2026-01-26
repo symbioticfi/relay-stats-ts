@@ -11,8 +11,10 @@ import {
     type ValSetExtraData,
     type ValSetEventKindType,
     type CrossChainAddress,
+    type EpochRange,
+    fetchSettlementEventsRange,
 } from '@symbioticfi/relay-stats-ts';
-import { createPublicClient, http, type Address, type Hex } from 'viem';
+import { createPublicClient, http, type Address, type Hex, type PublicClient } from 'viem';
 import { fileURLToPath } from 'url';
 
 const DEFAULT_RPC_URLS = ['http://localhost:8545', 'http://localhost:8546'];
@@ -22,6 +24,8 @@ const DEFAULT_DRIVER_CHAIN_ID = 31337;
 const rpcUrls = parseRpcUrls(process.env.RELAY_STATS_RPC_URLS);
 const driverChainId = parseChainId(process.env.RELAY_STATS_DRIVER_CHAIN_ID);
 const driverAddress = parseDriverAddress(process.env.RELAY_STATS_DRIVER_ADDRESS);
+
+const rpcMetrics = installRpcMetrics(rpcUrls);
 
 const COLORS = {
     reset: '\x1b[0m',
@@ -60,7 +64,7 @@ async function main() {
         ui.info('RPC URLs', rpcUrls.map(url => shortUrl(url)).join(', '));
         ui.info('Driver Chain ID', driverChainId);
         ui.info('Driver Address', driverAddress);
-        await verifyRpcUrls(rpcUrls, driverChainId);
+        const clientsByChainId = await verifyRpcUrls(rpcUrls, driverChainId);
 
         const deriver = await ValidatorSetDeriver.create({
             rpcUrls,
@@ -86,6 +90,12 @@ async function main() {
             ui.blank();
             return;
         }
+        const epochRange = resolveEpochRange(
+            currentEpoch,
+            process.env.RELAY_STATS_EPOCH_RANGE,
+            process.env.RELAY_STATS_EPOCH_FROM,
+            process.env.RELAY_STATS_EPOCH_TO
+        );
 
         // Get network configuration for current epoch
         ui.section('Network Configuration (Current Epoch)');
@@ -361,6 +371,14 @@ async function main() {
         }
 
         await displayEpochSnapshot(deriver, currentEpoch);
+        await displayEpochRangeSnapshots(deriver, epochRange);
+        await measureEpochRpcCalls(currentEpoch, 10);
+        await measureEventRangeRpcCalls(
+            deriver,
+            clientsByChainId,
+            currentEpoch,
+            [1, 2, 3, 5, 10, 20, 40]
+        );
     } catch (error) {
         ui.error(
             `Failed to initialize deriver: ${error instanceof Error ? error.message : String(error)}`
@@ -444,19 +462,107 @@ function parseDriverAddress(raw: string | undefined): Address {
     return trimmed as Address;
 }
 
-async function verifyRpcUrls(urls: string[], _expectedChainId: number) {
+function resolveEpochRange(
+    currentEpoch: number,
+    rawRange: string | undefined,
+    rawFrom: string | undefined,
+    rawTo: string | undefined
+): EpochRange {
+    const fallback: EpochRange = {
+        from: Math.max(0, currentEpoch - 2),
+        to: currentEpoch,
+    };
+
+    if (rawRange) {
+        const parsed = parseEpochRangeString(rawRange);
+        if (!parsed) {
+            ui.warn(
+                `Invalid RELAY_STATS_EPOCH_RANGE="${rawRange}". Using ${fallback.from}..${fallback.to}.`
+            );
+            return fallback;
+        }
+        const normalized = normalizeEpochRange(parsed, currentEpoch);
+        if (normalized.from !== parsed.from || normalized.to !== parsed.to) {
+            ui.warn(
+                `Adjusted epoch range ${parsed.from}..${parsed.to} to ${normalized.from}..${normalized.to}.`
+            );
+        }
+        return normalized;
+    }
+
+    if (rawFrom || rawTo) {
+        const from = parseEpochValue(rawFrom);
+        const to = parseEpochValue(rawTo);
+        if (from === null && to === null) {
+            ui.warn(
+                `Invalid RELAY_STATS_EPOCH_FROM="${rawFrom}" / RELAY_STATS_EPOCH_TO="${rawTo}". Using ${fallback.from}..${fallback.to}.`
+            );
+            return fallback;
+        }
+        const parsed: EpochRange = {
+            from: from ?? fallback.from,
+            to: to ?? fallback.to,
+        };
+        const normalized = normalizeEpochRange(parsed, currentEpoch);
+        if (normalized.from !== parsed.from || normalized.to !== parsed.to) {
+            ui.warn(
+                `Adjusted epoch range ${parsed.from}..${parsed.to} to ${normalized.from}..${normalized.to}.`
+            );
+        }
+        return normalized;
+    }
+
+    return fallback;
+}
+
+function parseEpochRangeString(raw: string): EpochRange | null {
+    const normalized = raw.replace(/\.\./g, '-');
+    const parts = normalized.split(/[\s,-]+/).filter(Boolean);
+    if (parts.length !== 2) return null;
+    const from = Number.parseInt(parts[0], 10);
+    const to = Number.parseInt(parts[1], 10);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+    return { from, to };
+}
+
+function parseEpochValue(raw: string | undefined): number | null {
+    if (!raw) return null;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed)) return null;
+    return parsed;
+}
+
+function normalizeEpochRange(range: EpochRange, currentEpoch: number): EpochRange {
+    let { from, to } = range;
+    if (from > to) {
+        [from, to] = [to, from];
+    }
+    if (from < 0) from = 0;
+    if (to < 0) to = 0;
+    if (to > currentEpoch) to = currentEpoch;
+    if (from > currentEpoch) from = currentEpoch;
+    return { from, to };
+}
+
+async function verifyRpcUrls(
+    urls: string[],
+    _expectedChainId: number
+): Promise<Map<number, PublicClient>> {
     ui.section('RPC Health Check');
+    const clientsByChainId = new Map<number, PublicClient>();
     for (const url of urls) {
         try {
             const client = createPublicClient({ transport: http(url) });
             const cid = await client.getChainId();
             ui.success(`RPC ${url} reachable (chainId ${cid})`);
+            clientsByChainId.set(cid, client);
         } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             ui.error(`RPC ${url} unreachable: ${message}`);
         }
     }
     ui.blank();
+    return clientsByChainId;
 }
 
 /**
@@ -517,9 +623,6 @@ async function tryDisplayValSetEvent(
 ) {
     const result = await fetchValSetEvent(deriver, settlement, epoch);
     if (result.event) {
-        if (result.origin === 'latest' && result.reason) {
-            ui.warn(`Finalized lookup failed (${result.reason}). Fallback to latest succeeded.`);
-        }
         displayValSetLogEvent(label, result.event, settlement);
     } else {
         ui.warn(`Failed to get event for ${contextLabel}`);
@@ -535,7 +638,6 @@ async function fetchValSetEvent(
     epoch: number
 ): Promise<{
     event: ValSetLogEvent | null;
-    origin: 'finalized' | 'latest' | null;
     reason?: string;
 }> {
     try {
@@ -545,25 +647,10 @@ async function fetchValSetEvent(
             finalized: true,
         });
         const event = events[0]?.event ?? null;
-        return { event, origin: 'finalized' };
+        return { event };
     } catch (finalizedError) {
         const finalizedReason = formatError(finalizedError);
-        try {
-            const events = await deriver.getValSetLogEvents({
-                epoch,
-                settlements: [settlement],
-                finalized: false,
-            });
-            const event = events[0]?.event ?? null;
-            return { event, origin: 'latest', reason: finalizedReason };
-        } catch (latestError) {
-            const latestReason = formatError(latestError);
-            return {
-                event: null,
-                origin: null,
-                reason: `Finalized failed: ${finalizedReason}; Latest failed: ${latestReason}`,
-            };
-        }
+        return { event: null, reason: finalizedReason };
     }
 }
 
@@ -734,6 +821,282 @@ async function displayEpochSnapshot(
             `getEpochData failed for epoch ${epoch}: ${error instanceof Error ? error.message : String(error)}`
         );
     }
+}
+
+async function displayEpochRangeSnapshots(
+    deriver: ValidatorSetDeriver,
+    epochRange: EpochRange,
+    finalized: boolean = true
+) {
+    ui.section(`Epoch Range Snapshot (${epochRange.from} → ${epochRange.to})`);
+    try {
+        const [snapshots, starts, durations] = await Promise.all([
+            deriver.getEpochsData({
+                epochRange,
+                finalized,
+                includeNetworkData: false,
+                includeValSetEvent: false,
+            }),
+            deriver.getEpochStarts(epochRange, finalized),
+            deriver.getEpochDurations(epochRange, finalized),
+        ]);
+
+        const startByEpoch = new Map(starts.map(entry => [entry.epoch, entry.start]));
+        const durationByEpoch = new Map(durations.map(entry => [entry.epoch, entry.duration]));
+
+        snapshots.forEach((snapshot, index) => {
+            ui.numbered(index + 1, `Epoch ${snapshot.epoch}`);
+            ui.info(
+                '    Status',
+                `${getStatusEmoji(snapshot.validatorSet.status)} ${snapshot.validatorSet.status}`
+            );
+            ui.info(
+                '    Integrity',
+                `${snapshot.validatorSet.integrity === 'valid' ? '✅' : '❌'} ${snapshot.validatorSet.integrity}`
+            );
+            ui.info('    Validators', snapshot.validatorSet.validators.length);
+            ui.info(
+                '    Active Validators',
+                snapshot.validatorSet.validators.filter(v => v.isActive).length
+            );
+            const start = startByEpoch.get(snapshot.epoch);
+            if (start !== undefined) {
+                ui.info('    Start', start);
+            }
+            const duration = durationByEpoch.get(snapshot.epoch);
+            if (duration !== undefined) {
+                ui.info('    Duration', duration);
+            }
+        });
+    } catch (error) {
+        ui.error(
+            `getEpochsData failed for range ${epochRange.from}..${epochRange.to}: ${
+                error instanceof Error ? error.message : String(error)
+            }`
+        );
+    }
+}
+
+type RpcMetricsSnapshot = {
+    totalRequests: number;
+    totalRpcCalls: number;
+    methodCounts: Map<string, number>;
+};
+
+type RpcMetrics = {
+    enable: () => void;
+    disable: () => void;
+    reset: () => void;
+    snapshot: () => RpcMetricsSnapshot;
+};
+
+function installRpcMetrics(urls: string[]): RpcMetrics {
+    if (!globalThis.fetch) {
+        throw new Error('global fetch is unavailable; cannot track RPC calls');
+    }
+
+    const urlSet = new Set(urls);
+    const state = {
+        enabled: false,
+        totalRequests: 0,
+        totalRpcCalls: 0,
+        methodCounts: new Map<string, number>(),
+    };
+
+    const originalFetch = globalThis.fetch.bind(globalThis);
+
+    globalThis.fetch = async (input: any, init?: any) => {
+        const url =
+            typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+        if (state.enabled && isTrackedUrl(url, urlSet)) {
+            state.totalRequests += 1;
+            const body = init?.body;
+            if (typeof body === 'string') {
+                try {
+                    const parsed = JSON.parse(body);
+                    const batch = Array.isArray(parsed) ? parsed : [parsed];
+                    state.totalRpcCalls += batch.length;
+                    for (const entry of batch) {
+                        const method = typeof entry?.method === 'string' ? entry.method : null;
+                        if (!method) continue;
+                        state.methodCounts.set(method, (state.methodCounts.get(method) ?? 0) + 1);
+                    }
+                } catch {
+                    // ignore parse failures
+                }
+            }
+        }
+        return originalFetch(input, init);
+    };
+
+    return {
+        enable: () => {
+            state.enabled = true;
+        },
+        disable: () => {
+            state.enabled = false;
+        },
+        reset: () => {
+            state.totalRequests = 0;
+            state.totalRpcCalls = 0;
+            state.methodCounts.clear();
+        },
+        snapshot: () => ({
+            totalRequests: state.totalRequests,
+            totalRpcCalls: state.totalRpcCalls,
+            methodCounts: new Map(state.methodCounts),
+        }),
+    };
+}
+
+function isTrackedUrl(url: string, urlSet: Set<string>): boolean {
+    for (const tracked of urlSet) {
+        if (url.startsWith(tracked)) return true;
+    }
+    return false;
+}
+
+function getMethodCount(snapshot: RpcMetricsSnapshot, method: string): number {
+    return snapshot.methodCounts.get(method) ?? 0;
+}
+
+async function measureEpochRpcCalls(currentEpoch: number, windowSize: number) {
+    const epochRange = buildRollingEpochRange(currentEpoch, windowSize);
+    ui.section('RPC Call Metrics (Sequential vs Range)');
+    const rangeSize = epochRange.to - epochRange.from + 1;
+    const options = {
+        finalized: true,
+        includeNetworkData: false,
+        includeSettlementStatus: false,
+        includeCollateralMetadata: false,
+        includeValSetEvent: false,
+    } as const;
+
+    const sequentialDeriver = await ValidatorSetDeriver.create({
+        rpcUrls,
+        driverAddress: {
+            chainId: driverChainId,
+            address: driverAddress,
+        },
+        cache: null,
+    });
+
+    rpcMetrics.reset();
+    rpcMetrics.enable();
+    try {
+        for (let epoch = epochRange.from; epoch <= epochRange.to; epoch++) {
+            await sequentialDeriver.getEpochData({ epoch, ...options });
+        }
+    } finally {
+        rpcMetrics.disable();
+    }
+    const sequentialMetrics = rpcMetrics.snapshot();
+
+    const rangeDeriver = await ValidatorSetDeriver.create({
+        rpcUrls,
+        driverAddress: {
+            chainId: driverChainId,
+            address: driverAddress,
+        },
+        cache: null,
+    });
+
+    rpcMetrics.reset();
+    rpcMetrics.enable();
+    try {
+        await rangeDeriver.getEpochsData({ epochRange, ...options });
+    } finally {
+        rpcMetrics.disable();
+    }
+    const rangeMetrics = rpcMetrics.snapshot();
+
+    const sequentialEthCalls = getMethodCount(sequentialMetrics, 'eth_call');
+    const rangeEthCalls = getMethodCount(rangeMetrics, 'eth_call');
+    const perEpochEthCalls = rangeSize > 0 ? rangeEthCalls / rangeSize : 0;
+    const sequentialTotalCalls = sequentialMetrics.totalRpcCalls;
+    const rangeTotalCalls = rangeMetrics.totalRpcCalls;
+    const sequentialTotalRequests = sequentialMetrics.totalRequests;
+    const rangeTotalRequests = rangeMetrics.totalRequests;
+
+    ui.info('Sequential', `${epochRange.from}..${epochRange.to} (${rangeSize} epochs)`);
+    ui.info('Range', `${epochRange.from}..${epochRange.to} (${rangeSize} epochs)`);
+    ui.info('Sequential eth_call', sequentialEthCalls);
+    ui.info('Range eth_call', rangeEthCalls);
+    ui.info('Range eth_call/epoch', perEpochEthCalls.toFixed(2));
+    ui.info('Sequential total RPC calls (sum)', sequentialTotalCalls);
+    ui.info('Range total RPC calls (sum)', rangeTotalCalls);
+    ui.info('Sequential total HTTP requests (sum)', sequentialTotalRequests);
+    ui.info('Range total HTTP requests (sum)', rangeTotalRequests);
+}
+
+async function measureEventRangeRpcCalls(
+    deriver: ValidatorSetDeriver,
+    clientsByChainId: Map<number, PublicClient>,
+    currentEpoch: number,
+    rangeSizes: number[]
+) {
+    ui.section('RPC Call Metrics (Event Logs by Range Size)');
+    const config = await deriver.getNetworkConfig(currentEpoch, true);
+    if (config.settlements.length === 0) {
+        ui.warn('No settlements configured; skipping event log metrics.');
+        return;
+    }
+
+    for (const size of rangeSizes) {
+        const rangeSize = Math.max(1, Math.floor(size));
+        const fromEpoch = Math.max(0, currentEpoch - rangeSize + 1);
+        const toEpoch = currentEpoch;
+
+        const [startFrom, startTo] = await Promise.all([
+            deriver.getEpochStart(fromEpoch, true),
+            deriver.getEpochStart(toEpoch, true),
+        ]);
+        let duration = 0;
+        try {
+            duration = await deriver.getEpochDuration(toEpoch, true);
+        } catch {
+            duration = await deriver.getCurrentEpochDuration(true);
+        }
+
+        rpcMetrics.reset();
+        rpcMetrics.enable();
+        try {
+            await Promise.all(
+                config.settlements.map(settlement => {
+                    const client = clientsByChainId.get(settlement.chainId);
+                    if (!client) {
+                        ui.warn(`No RPC client for chain ${settlement.chainId}; skipping.`);
+                        return Promise.resolve(new Map());
+                    }
+                    return fetchSettlementEventsRange(
+                        client,
+                        settlement,
+                        fromEpoch,
+                        toEpoch,
+                        startFrom,
+                        startTo,
+                        duration,
+                        true
+                    );
+                })
+            );
+        } finally {
+            rpcMetrics.disable();
+        }
+
+        const metrics = rpcMetrics.snapshot();
+        ui.info('Epoch Range', `${fromEpoch}..${toEpoch} (${rangeSize} epochs)`);
+        ui.info('Total RPC calls (sum)', metrics.totalRpcCalls);
+        ui.info('Total HTTP requests (sum)', metrics.totalRequests);
+        ui.info('eth_getLogs', getMethodCount(metrics, 'eth_getLogs'));
+        ui.info('eth_getBlockByNumber', getMethodCount(metrics, 'eth_getBlockByNumber'));
+    }
+}
+
+function buildRollingEpochRange(currentEpoch: number, windowSize: number): EpochRange {
+    const size = Math.max(1, Math.floor(windowSize));
+    const from = Math.max(0, currentEpoch - size + 1);
+    return { from, to: currentEpoch };
 }
 
 /**

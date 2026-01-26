@@ -1,51 +1,43 @@
-import { Address, Hex } from 'viem';
+import type { Address, Hex } from 'viem';
 import type { NetworkConfig } from './network-config.js';
 import type { SettlementValSetLog, SettlementValSetStatus } from './settlement.js';
 import type { AggregatorExtraDataEntry, ValidatorSet } from './validator-set.js';
 
 /** @notice Cross-chain address (chainId + EVM address). */
-export class CrossChainAddress {
-    constructor(
-        public chainId: number,
-        public address: Address
-    ) {}
+export interface CrossChainAddress {
+    chainId: number;
+    address: Address;
 }
 
 /** @notice EIP-712 domain data exposed by settlement contracts. */
-export class Eip712Domain {
-    constructor(
-        public fields: string,
-        public name: string,
-        public version: string,
-        public chainId: bigint,
-        public verifyingContract: Address,
-        public salt: Hex,
-        public extensions: bigint[]
-    ) {}
+export interface Eip712Domain {
+    fields: string;
+    name: string;
+    version: string;
+    chainId: bigint;
+    verifyingContract: Address;
+    salt: Hex;
+    extensions: bigint[];
 }
 
 /** @notice Network metadata fetched from driver and settlement. */
-export class NetworkData {
-    constructor(
-        public address: Address,
-        public subnetwork: Hex,
-        public eip712Data: Eip712Domain
-    ) {}
+export interface NetworkData {
+    address: Address;
+    subnetwork: Hex;
+    eip712Data: Eip712Domain;
 }
 
 /** @notice Combined epoch snapshot produced by the deriver. */
-export class EpochData {
-    constructor(
-        public epoch: number,
-        public finalized: boolean,
-        public epochStart: number,
-        public config: NetworkConfig,
-        public validatorSet: ValidatorSet,
-        public networkData?: NetworkData,
-        public settlementStatuses?: SettlementValSetStatus[],
-        public valSetEvents?: SettlementValSetLog[],
-        public aggregatorsExtraData?: AggregatorExtraDataEntry[]
-    ) {}
+export interface EpochData {
+    epoch: number;
+    finalized: boolean;
+    epochStart: number;
+    config: NetworkConfig;
+    validatorSet: ValidatorSet;
+    networkData?: NetworkData;
+    settlementStatuses?: SettlementValSetStatus[];
+    valSetEvents?: SettlementValSetLog[];
+    aggregatorsExtraData?: AggregatorExtraDataEntry[];
 }
 
 /** @notice Cache contract used by the deriver to persist finalized data. */
@@ -54,4 +46,10 @@ export interface CacheInterface {
     set(epoch: number, key: string, value: unknown): Promise<void>;
     delete(epoch: number, key: string): Promise<void>;
     clear(epoch: number): Promise<void>;
+}
+
+/** @notice Inclusive epoch range for batch helpers. */
+export interface EpochRange {
+    from: number;
+    to: number;
 }

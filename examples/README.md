@@ -50,6 +50,19 @@ export RELAY_STATS_DRIVER_ADDRESS=0xE1A1629C2a0447eA1e787527329805B234ac605C
 
 `RELAY_STATS_RPC_URLS` accepts comma-, newline-, or JSON array-separated values. Leaving the variables unset falls back to the same local devnet defaults shown above.
 
+You can also control which epochs are displayed:
+
+```bash
+# Option A: explicit range
+export RELAY_STATS_EPOCH_RANGE=5..8
+
+# Option B: explicit from/to
+export RELAY_STATS_EPOCH_FROM=5
+export RELAY_STATS_EPOCH_TO=8
+```
+
+If none are provided, the example uses the current epoch only.
+
 ## Step 4 – Run the script
 
 Choose one of the following approaches:
@@ -82,6 +95,12 @@ On a healthy setup you will see logs for:
 7. Aggregator extra data entries for both simple and zk modes
 
 If the RPC endpoints are unreachable or misconfigured you will see an `HTTP request failed` message. Double-check that the RPC URLs are correct, the driver contract exists at the specified address, and the devnet (if used) is fully booted.
+
+The example always queries finalized data (`finalized: true`). If an epoch is still pending, the validator-set event section will report that no committed event is available yet. To read latest data instead, update the example code to pass `finalized: false` explicitly where needed.
+
+## Additional scripts
+
+- `examples/check-epoch-range.mjs` validates event log ranges for a single epoch. See `examples/README-range.md` for usage.
 
 ## FAQ
 

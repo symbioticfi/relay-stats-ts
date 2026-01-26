@@ -1,10 +1,6 @@
 import { hexToString, type Address, type Hex, type PublicClient } from 'viem';
 import { ERC20_METADATA_ABI, VAULT_ABI } from './abis/index.js';
 import { executeChunkedMulticall, type MulticallRequest } from './client.js';
-import {
-    MULTICALL_ERC20_METADATA_CALL_GAS,
-    MULTICALL_VAULT_COLLATERAL_CALL_GAS,
-} from './constants.js';
 import type { Validator } from './types/index.js';
 import { blockTagFromFinality, type BlockTagPreference } from './utils/core.js';
 
@@ -23,14 +19,12 @@ type ResolveCollateralsParams = {
     client: PublicClient;
     vaults: readonly Address[];
     blockTag: BlockTagPreference;
-    allowMulticall: boolean;
 };
 
 type ResolveTokenMetadataParams = {
     client: PublicClient;
     tokens: readonly Address[];
     blockTag: BlockTagPreference;
-    allowMulticall: boolean;
 };
 
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000';
@@ -74,51 +68,25 @@ export const resolveVaultCollaterals = async ({
     client,
     vaults,
     blockTag,
-    allowMulticall,
 }: ResolveCollateralsParams): Promise<Map<string, Address>> => {
     const uniqueVaults = dedupeAddresses(vaults);
     const collaterals = new Map<string, Address>();
     if (uniqueVaults.length === 0) return collaterals;
 
-    let collateralResults: (Address | null)[] = [];
+    const requests: MulticallRequest[] = uniqueVaults.map(address => ({
+        address,
+        abi: VAULT_ABI,
+        functionName: 'collateral',
+        args: [],
+    }));
 
-    if (allowMulticall) {
-        const requests: MulticallRequest[] = uniqueVaults.map(address => ({
-            address,
-            abi: VAULT_ABI,
-            functionName: 'collateral',
-            args: [],
-            estimatedGas: MULTICALL_VAULT_COLLATERAL_CALL_GAS,
-        }));
-
-        collateralResults = await executeChunkedMulticall<Address | null>({
-            client,
-            requests,
-            blockTag,
-            allowFailure: true,
-        });
-    }
-
-    if (collateralResults.length === 0) {
-        collateralResults = Array(uniqueVaults.length).fill(null);
-    }
+    const collateralResults = await executeChunkedMulticall<Address | null>({
+        client,
+        requests,
+        blockTag,
+    });
 
     for (let i = 0; i < uniqueVaults.length; i++) {
-        if (!collateralResults[i]) {
-            try {
-                const fallback = (await client.readContract({
-                    address: uniqueVaults[i],
-                    abi: VAULT_ABI,
-                    functionName: 'collateral',
-                    args: [],
-                    blockTag,
-                })) as Address;
-                collateralResults[i] = fallback;
-            } catch {
-                collateralResults[i] = null;
-            }
-        }
-
         const collateral = collateralResults[i];
         if (!collateral || collateral.toLowerCase() === ZERO_ADDRESS) continue;
         collaterals.set(uniqueVaults[i].toLowerCase(), collateral as Address);
@@ -131,7 +99,6 @@ export const resolveTokenMetadata = async ({
     client,
     tokens,
     blockTag,
-    allowMulticall,
 }: ResolveTokenMetadataParams): Promise<Map<string, TokenMetadata>> => {
     const uniqueTokens = dedupeAddresses(tokens);
     const metadata = new Map<string, TokenMetadata>();
@@ -146,7 +113,6 @@ export const resolveTokenMetadata = async ({
             abi: ERC20_METADATA_ABI,
             functionName: 'symbol',
             args: [],
-            estimatedGas: MULTICALL_ERC20_METADATA_CALL_GAS,
         });
         callMap.push({ token, field: 'symbol' });
 
@@ -155,25 +121,15 @@ export const resolveTokenMetadata = async ({
             abi: ERC20_METADATA_ABI,
             functionName: 'name',
             args: [],
-            estimatedGas: MULTICALL_ERC20_METADATA_CALL_GAS,
         });
         callMap.push({ token, field: 'name' });
     }
 
-    let results: (string | null)[] = [];
-
-    if (allowMulticall) {
-        results = await executeChunkedMulticall<string | null>({
-            client,
-            requests,
-            blockTag,
-            allowFailure: true,
-        });
-    } else {
-        results = Array(requests.length).fill(null);
-    }
-
-    const fallbackRequests = new Map<Address, Set<'symbol' | 'name'>>();
+    const results = await executeChunkedMulticall<string | null>({
+        client,
+        requests,
+        blockTag,
+    });
 
     for (let i = 0; i < callMap.length; i++) {
         const { token, field } = callMap[i];
@@ -188,38 +144,6 @@ export const resolveTokenMetadata = async ({
                 existing.name = normalized;
             }
             metadata.set(key, existing);
-        } else {
-            const current = fallbackRequests.get(token) ?? new Set<'symbol' | 'name'>();
-            current.add(field);
-            fallbackRequests.set(token, current);
-        }
-    }
-
-    if (fallbackRequests.size > 0) {
-        for (const [token, fields] of fallbackRequests) {
-            for (const field of fields) {
-                try {
-                    const value = await client.readContract({
-                        address: token,
-                        abi: ERC20_METADATA_ABI,
-                        functionName: field,
-                        args: [],
-                        blockTag,
-                    });
-                    const normalized = normalizeTokenMetadataValue(value);
-                    if (normalized === null) continue;
-                    const key = token.toLowerCase();
-                    const existing = metadata.get(key) ?? { address: token };
-                    if (field === 'symbol') {
-                        existing.symbol = normalized;
-                    } else {
-                        existing.name = normalized;
-                    }
-                    metadata.set(key, existing);
-                } catch {
-                    continue;
-                }
-            }
         }
     }
 
@@ -230,12 +154,10 @@ export const applyCollateralMetadata = async ({
     validators,
     finalized,
     getClient,
-    hasMulticall,
 }: {
     validators: Validator[];
     finalized: boolean;
     getClient: (chainId: number) => PublicClient;
-    hasMulticall: (chainId: number, blockTag: BlockTagPreference) => Promise<boolean>;
 }): Promise<void> => {
     const vaultsByChain = new Map<number, Address[]>();
 
@@ -255,7 +177,6 @@ export const applyCollateralMetadata = async ({
     const metadataByChain = await loadCollateralMetadata({
         vaultsByChain,
         getClient,
-        hasMulticall,
         finalized,
     });
 
@@ -284,23 +205,20 @@ export const applyCollateralMetadata = async ({
 export const loadCollateralMetadata = async (params: {
     vaultsByChain: Map<number, Address[]>;
     getClient: (chainId: number) => PublicClient;
-    hasMulticall: (chainId: number, blockTag: BlockTagPreference) => Promise<boolean>;
     finalized: boolean;
 }): Promise<Map<number, ChainCollateralMetadata>> => {
-    const { vaultsByChain, getClient, hasMulticall, finalized } = params;
+    const { vaultsByChain, getClient, finalized } = params;
     const blockTag = blockTagFromFinality(finalized);
     const result = new Map<number, ChainCollateralMetadata>();
 
     for (const [chainId, vaults] of vaultsByChain) {
         if (!vaults || vaults.length === 0) continue;
         const client = getClient(chainId);
-        const allowMulticall = await hasMulticall(chainId, blockTag);
 
         const vaultCollaterals = await resolveVaultCollaterals({
             client,
             vaults,
             blockTag,
-            allowMulticall,
         });
 
         if (vaultCollaterals.size === 0) continue;
@@ -310,7 +228,6 @@ export const loadCollateralMetadata = async (params: {
             client,
             tokens,
             blockTag,
-            allowMulticall,
         });
 
         result.set(chainId, {

@@ -13,17 +13,10 @@
     "scripts": {
         "build": "tsc",
         "clean": "rm -rf dist",
-        "lint": "pnpm run lint:check",
-        "lint:check": "eslint .",
-        "lint:fix": "eslint . --fix",
-        "format": "pnpm run format:fix",
-        "format:check": "prettier --check .",
-        "format:fix": "prettier --write .",
-        "check": "pnpm run lint:check && pnpm run format:check && pnpm run build",
-        "fix": "pnpm run lint:fix && pnpm run format:fix",
-        "precommit": "lint-staged",
-        "ci": "pnpm run build && pnpm run lint:check && pnpm run format:check",
-        "rebuild": "pnpm run build && cd examples && pnpm install --force && pnpm run build"
+        "lint": "eslint .",
+        "format": "prettier --write .",
+        "check": "pnpm run lint && prettier --check . && pnpm run build",
+        "fix": "pnpm run lint -- --fix && pnpm run format"
     },
     "keywords": [
         "symbiotic",
@@ -52,7 +45,8 @@
         "@chainsafe/ssz": "^1.2.2",
         "big-integer": "^1.6.52",
         "circomlibjs": "^0.0.8",
-        "viem": "^2.36.0"
+        "viem": "^2.36.0",
+        "yocto-queue": "^1.2.2"
     },
     "devDependencies": {
         "@eslint/js": "^9.39.1",

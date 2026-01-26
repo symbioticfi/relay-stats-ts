@@ -1,11 +1,9 @@
 import type { Address, Hex } from 'viem';
 
 /** @notice Validator signing key with its tag. */
-export class ValidatorKey {
-    constructor(
-        public tag: number,
-        public payload: Hex
-    ) {}
+export interface ValidatorKey {
+    tag: number;
+    payload: Hex;
 }
 
 export enum KeyType {
@@ -29,52 +27,38 @@ export function getKeyType(tag: KeyTag): KeyType {
 }
 
 /** @notice Validator vault entry with optional collateral metadata. */
-export class ValidatorVault {
+export interface ValidatorVault {
+    vault: Address;
+    votingPower: bigint;
+    chainId: number;
     collateral?: Address;
     collateralSymbol?: string;
     collateralName?: string;
-
-    constructor(
-        public vault: Address,
-        public votingPower: bigint,
-        public chainId: number,
-        collateral?: Address
-    ) {
-        this.collateral = collateral;
-    }
 }
 
 /** @notice Aggregated validator record used in validator sets. */
-export class Validator {
-    constructor(
-        public operator: Address,
-        public votingPower: bigint,
-        public isActive: boolean,
-        public keys: ValidatorKey[],
-        public vaults: ValidatorVault[]
-    ) {}
+export interface Validator {
+    operator: Address;
+    votingPower: bigint;
+    isActive: boolean;
+    keys: ValidatorKey[];
+    vaults: ValidatorVault[];
 }
 
 /** @notice Voting power per vault for an operator. */
-export class VaultVotingPower {
-    constructor(
-        public vault: Address,
-        public votingPower: bigint
-    ) {}
+export interface VaultVotingPower {
+    vault: Address;
+    votingPower: bigint;
 }
 
 /** @notice Operator voting power grouped by vaults. */
-export class OperatorVotingPower {
-    constructor(
-        public operator: Address,
-        public vaults: VaultVotingPower[]
-    ) {}
+export interface OperatorVotingPower {
+    operator: Address;
+    vaults: VaultVotingPower[];
 }
 
 /** @notice Operator keys snapshot returned by the key registry. */
-export class OperatorWithKeys {
-    constructor(
-        public operator: Address,
-        public keys: ValidatorKey[]
-    ) {}
+export interface OperatorWithKeys {
+    operator: Address;
+    keys: ValidatorKey[];
 }

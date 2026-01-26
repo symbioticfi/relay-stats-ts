@@ -1,5 +1,9 @@
-import { encodeAbiParameters, keccak256, type Address, type Hex } from 'viem';
+import { encodeAbiParameters, keccak256, type Address, type Hex, type PublicClient } from 'viem';
+import { buildSimpleExtraData, buildZkExtraData } from './extra-data/index.js';
+import { applyCollateralMetadata } from './metadata.js';
 import type {
+    AggregatorExtraDataEntry,
+    CrossChainAddress,
     NetworkConfig,
     OperatorVotingPower,
     OperatorWithKeys,
@@ -7,7 +11,7 @@ import type {
     ValidatorSet,
     ValidatorSetHeader,
 } from './types/index.js';
-import { SSZ_MAX_VALIDATORS, SSZ_MAX_VAULTS } from './constants.js';
+import { SSZ_MAX_VALIDATORS, SSZ_MAX_VAULTS, VALSET_VERSION } from './constants.js';
 import { sszTreeRoot } from './utils/ssz.js';
 
 /** @notice Sum voting power of active validators only. */
@@ -212,4 +216,248 @@ export const calculateQuorumThreshold = (
     const multiplied = totalVotingPower * threshold.quorumThreshold;
     const divided = multiplied / maxThreshold;
     return divided + 1n;
+};
+
+type ValidatorSetBuildContext = {
+    getClient: (chainId: number) => PublicClient;
+};
+
+export const buildValidatorSetFromData = async (
+    params: {
+        targetEpoch: number;
+        finalized: boolean;
+        epochStart: number;
+        config: NetworkConfig;
+        includeCollateralMetadata: boolean;
+        allVotingPowers: { chainId: number; votingPowers: OperatorVotingPower[] }[];
+        keys: OperatorWithKeys[];
+    } & ValidatorSetBuildContext
+): Promise<ValidatorSet> => {
+    const {
+        targetEpoch,
+        finalized,
+        epochStart,
+        config,
+        includeCollateralMetadata,
+        allVotingPowers,
+        keys,
+        getClient,
+    } = params;
+
+    const timestampNumber = Number(epochStart);
+
+    const validators = composeValidators(config, allVotingPowers, keys);
+    if (includeCollateralMetadata) {
+        await applyCollateralMetadata({
+            validators,
+            finalized,
+            getClient,
+        });
+    }
+
+    const totalVotingPower = validators
+        .filter(validator => validator.isActive)
+        .reduce((sum, validator) => sum + validator.votingPower, 0n);
+    const quorumThreshold = calculateQuorumThreshold(config, totalVotingPower);
+    const sortedRequiredTags = [...config.requiredKeyTags].sort((a, b) => a - b);
+
+    const baseValset: ValidatorSet = {
+        version: VALSET_VERSION,
+        requiredKeyTag: config.requiredHeaderKeyTag,
+        epoch: targetEpoch,
+        captureTimestamp: timestampNumber,
+        quorumThreshold,
+        validators,
+        totalVotingPower,
+        status: 'pending',
+        integrity: 'valid',
+        extraData: [],
+    };
+
+    const simpleExtra = buildSimpleExtraData(baseValset, sortedRequiredTags);
+    const zkExtra = await buildZkExtraData(baseValset, sortedRequiredTags);
+
+    const combinedEntries = [...simpleExtra, ...zkExtra];
+    const deduped = new Map<string, AggregatorExtraDataEntry>();
+    for (const entry of combinedEntries) {
+        deduped.set(entry.key.toLowerCase(), entry);
+    }
+    const extraData = Array.from(deduped.values()).sort((left, right) =>
+        left.key.toLowerCase().localeCompare(right.key.toLowerCase())
+    );
+
+    return {
+        ...baseValset,
+        extraData,
+    };
+};
+
+export const buildValidatorSet = async (
+    params: {
+        targetEpoch: number;
+        finalized: boolean;
+        epochStart: number;
+        config: NetworkConfig;
+        includeCollateralMetadata: boolean;
+        getVotingPowers: (
+            provider: CrossChainAddress,
+            timestamp: number,
+            finalized: boolean
+        ) => Promise<OperatorVotingPower[]>;
+        getKeys: (
+            provider: CrossChainAddress,
+            timestamp: number,
+            finalized: boolean
+        ) => Promise<OperatorWithKeys[]>;
+    } & ValidatorSetBuildContext
+): Promise<ValidatorSet> => {
+    const {
+        targetEpoch,
+        finalized,
+        epochStart,
+        config,
+        includeCollateralMetadata,
+        getVotingPowers,
+        getKeys,
+        getClient,
+    } = params;
+
+    const timestampNumber = Number(epochStart);
+
+    const allVotingPowers: { chainId: number; votingPowers: OperatorVotingPower[] }[] = [];
+    for (const provider of config.votingPowerProviders) {
+        const votingPowers = await getVotingPowers(provider, timestampNumber, finalized);
+        allVotingPowers.push({
+            chainId: provider.chainId,
+            votingPowers,
+        });
+    }
+
+    const keys = await getKeys(config.keysProvider, timestampNumber, finalized);
+
+    return buildValidatorSetFromData({
+        targetEpoch,
+        finalized,
+        epochStart,
+        config,
+        includeCollateralMetadata,
+        allVotingPowers,
+        keys,
+        getClient,
+    });
+};
+
+export const buildValidatorSetsBatch = async (
+    params: {
+        targetEpochs: readonly number[];
+        finalized: boolean;
+        includeCollateralMetadata: boolean;
+        configEntries: Map<number, { config: NetworkConfig; epochStart: number }>;
+        getVotingPowersBatch: (
+            provider: CrossChainAddress,
+            timestamps: readonly number[],
+            finalized: boolean
+        ) => Promise<OperatorVotingPower[][]>;
+        getKeysBatch: (
+            provider: CrossChainAddress,
+            timestamps: readonly number[],
+            finalized: boolean
+        ) => Promise<OperatorWithKeys[][]>;
+    } & ValidatorSetBuildContext
+): Promise<Map<number, ValidatorSet>> => {
+    const {
+        targetEpochs,
+        finalized,
+        includeCollateralMetadata,
+        configEntries,
+        getVotingPowersBatch,
+        getKeysBatch,
+        getClient,
+    } = params;
+
+    const epochInputs = targetEpochs.map(targetEpoch => {
+        const entry = configEntries.get(targetEpoch);
+        if (!entry) {
+            throw new Error(`Missing network config for epoch ${targetEpoch}`);
+        }
+        return { epoch: targetEpoch, config: entry.config, epochStart: entry.epochStart };
+    });
+
+    const votingRequests = new Map<
+        string,
+        { provider: CrossChainAddress; items: { epoch: number; timestamp: number }[] }
+    >();
+    const keysRequests = new Map<
+        string,
+        { provider: CrossChainAddress; items: { epoch: number; timestamp: number }[] }
+    >();
+
+    for (const input of epochInputs) {
+        const timestampNumber = Number(input.epochStart);
+
+        for (const provider of input.config.votingPowerProviders) {
+            const key = `${provider.chainId}:${provider.address.toLowerCase()}`;
+            const entry = votingRequests.get(key) ?? { provider, items: [] };
+            entry.items.push({ epoch: input.epoch, timestamp: timestampNumber });
+            votingRequests.set(key, entry);
+        }
+
+        const keysProvider = input.config.keysProvider;
+        const keysKey = `${keysProvider.chainId}:${keysProvider.address.toLowerCase()}`;
+        const keysEntry = keysRequests.get(keysKey) ?? { provider: keysProvider, items: [] };
+        keysEntry.items.push({ epoch: input.epoch, timestamp: timestampNumber });
+        keysRequests.set(keysKey, keysEntry);
+    }
+
+    const votingPowersByEpoch = new Map<
+        number,
+        { chainId: number; votingPowers: OperatorVotingPower[] }[]
+    >();
+    for (const { provider, items } of votingRequests.values()) {
+        const timestamps = items.map(item => item.timestamp);
+        const results = await getVotingPowersBatch(provider, timestamps, finalized);
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            const perEpoch = votingPowersByEpoch.get(item.epoch);
+            if (!perEpoch) {
+                votingPowersByEpoch.set(item.epoch, [
+                    { chainId: provider.chainId, votingPowers: results[i] ?? [] },
+                ]);
+            } else {
+                perEpoch.push({
+                    chainId: provider.chainId,
+                    votingPowers: results[i] ?? [],
+                });
+            }
+        }
+    }
+
+    const keysByEpoch = new Map<number, OperatorWithKeys[]>();
+    for (const { provider, items } of keysRequests.values()) {
+        const timestamps = items.map(item => item.timestamp);
+        const results = await getKeysBatch(provider, timestamps, finalized);
+        for (let i = 0; i < items.length; i++) {
+            const item = items[i];
+            keysByEpoch.set(item.epoch, results[i] ?? []);
+        }
+    }
+
+    const results = new Map<number, ValidatorSet>();
+    for (const input of epochInputs) {
+        const allVotingPowers = votingPowersByEpoch.get(input.epoch) ?? [];
+        const keys = keysByEpoch.get(input.epoch) ?? [];
+        const validatorSet = await buildValidatorSetFromData({
+            targetEpoch: input.epoch,
+            finalized,
+            epochStart: input.epochStart,
+            config: input.config,
+            includeCollateralMetadata,
+            allVotingPowers,
+            keys,
+            getClient,
+        });
+        results.set(input.epoch, validatorSet);
+    }
+
+    return results;
 };

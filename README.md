@@ -87,9 +87,58 @@ console.log(
 );
 ```
 
+### Batch epoch snapshots
+
+`getEpochsData` returns the same snapshot shape for an epoch range in one call (results are returned in ascending order):
+
+```ts
+const snapshots = await deriver.getEpochsData({
+    epochRange: { from: 1, to: 3 },
+    finalized: true,
+    includeNetworkData: true,
+    includeValSetEvent: true,
+});
+
+snapshots.forEach(snapshot => {
+    console.log(snapshot.epoch, snapshot.validatorSet.status);
+});
+```
+
+Batch helpers use multicall to minimize RPCs when available.
+
 Aggregator extra data returned by `getEpochData` automatically uses the network configuration's `verificationType` (simple vs zk). Provide `aggregatorKeyTags` only when you need to override the defaults coming from the config.
 
 See `displayEpochSnapshot` in [`examples/example.ts`](examples/example.ts) for a full walkthrough that prints the combined response.
+
+### Range helpers
+
+For range-style reads (status, settlement logs, timings), use the batch APIs:
+
+```ts
+const epochRange = { from: 10, to: 12 };
+
+const statuses = await deriver.getValSetStatuses(epochRange, true);
+statuses.forEach(({ epoch, status }) => {
+    console.log(epoch, status.status, status.integrity);
+});
+
+const logEvents = await deriver.getValSetLogEventsForEpochs({
+    epochRange,
+    finalized: true,
+});
+logEvents.forEach(({ epoch, logs }) => {
+    console.log(
+        epoch,
+        logs.map(log => log.committed)
+    );
+});
+
+const [starts, durations] = await Promise.all([
+    deriver.getEpochStarts(epochRange, true),
+    deriver.getEpochDurations(epochRange, true),
+]);
+console.log(starts, durations);
+```
 
 ### Validator set events
 
@@ -119,11 +168,11 @@ settlements.forEach(({ settlement, committed }) => {
 
 `getEpochData` now mirrors this behaviour: when `includeValSetEvent` is `true`, the response includes `settlementStatuses` alongside `valSetEvents`, containing entries for every settlement and returning logs only for those that are already committed.
 
-Internally the library batches settlement reads with `Multicall3` when available and caches finalized results to avoid redundant log scans.
+Internally the library batches settlement reads with `Multicall3` when available.
 
 ## Caching
 
-`ValidatorSetDeriver` accepts any cache that conforms to the `CacheInterface` and only persists finalized data. Cache entries are namespaced by epoch and a string key, allowing multiple values per epoch. Implement the interface to integrate Redis, in-memory caches, or other stores:
+`ValidatorSetDeriver` accepts any cache that conforms to the `CacheInterface` and only persists finalized data. Cache entries are namespaced by epoch and a string key, allowing multiple values per epoch. The deriver keeps a FIFO list of cached epochs and evicts them with `cache.clear(epoch)` once `maxSavedEpochs` is exceeded; non-epoch data (like network metadata) is stored under a persistent epoch sentinel. Implement the interface to integrate Redis, in-memory caches, or other stores:
 
 ```ts
 import type { CacheInterface } from '@symbioticfi/relay-stats-ts';
@@ -171,10 +220,11 @@ All exports live under `@symbioticfi/relay-stats-ts`. Key entry points:
 
 - `ValidatorSetDeriver.create(config)` – initialize clients (one per chain) and validate required RPC coverage.
 - `getEpochData({ epoch?, finalized?, includeNetworkData?, includeValSetEvent?, aggregatorKeyTags? })` – single snapshot with validator set, optional network metadata, aggregator extras, settlement statuses, and per-settlement log events.
-- `getValidatorSet(epoch?, finalized?)` / `getNetworkConfig(epoch?, finalized?)` / `getNetworkData(settlement?, finalized?)` – granular primitives backing the combined call.
-- `getValSetSettlementStatuses({ epoch?, settlements?, finalized? })` – commitment + header-hash status per settlement.
-- `getValSetLogEvents({ epoch?, settlements?, finalized? })` – settlement-indexed log results (only fetches logs for committed settlements).
-- `getAggregatorsExtraData(mode, keyTags?, finalized?, epoch?)` – manual access to simple/zk aggregator payloads when you need custom modes or tags.
+- `getEpochsData({ epochRange?, finalized?, includeNetworkData?, includeValSetEvent?, aggregatorKeyTags? })` – batch snapshot (array) in ascending order with the same shape as `getEpochData`.
+- `getValidatorSet(epoch?, finalized?)` / `getNetworkConfig(epoch?, finalized?)` / `getNetworkData(settlement?, finalized?)` – granular primitives backing the combined call, plus batch variants `getValidatorSets(epochRange?)` and `getNetworkConfigs(epochRange?)`.
+- `getEpochStart(epoch)` / `getEpochDuration(epoch)` – driver timing helpers, plus batch variants `getEpochStarts(epochRange)` and `getEpochDurations(epochRange)`.
+- `getValSetStatus(epoch)` / `getValSetSettlementStatuses({ epoch?, settlements?, finalized? })` / `getValSetLogEvents({ epoch?, settlements?, finalized? })` – settlement state and events, plus batch variants `getValSetStatuses(epochRange)`, `getValSetSettlementStatusesForEpochs(...)`, and `getValSetLogEventsForEpochs(...)`.
+- `getAggregatorsExtraData(mode, keyTags?, finalized?, epoch?)` / `getAggregatorsExtraDataForEpochs({ epochRange?, mode, keyTags?, finalized? })` – manual access to simple/zk aggregator payloads.
 - Utilities for downstream consumers: `getTotalActiveVotingPower`, `getValidatorSetHeader`, `abiEncodeValidatorSetHeader`, `hashValidatorSetHeader`, `getValidatorSetHeaderHash`.
 - Low-level helpers are re-exported: `buildSimpleExtraData`, `buildZkExtraData`, and the SSZ encoding utilities (`serializeValidatorSet`, `getValidatorSetRoot`, etc.).
 
