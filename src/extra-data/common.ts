@@ -1,15 +1,22 @@
-import { encodeAbiParameters, keccak256, type Hex } from 'viem';
+import {
+    bytesToBigInt,
+    bytesToHex,
+    encodeAbiParameters,
+    hexToBytes,
+    keccak256,
+    stringToHex,
+    toBytes,
+    type Hex,
+} from 'viem';
 import { EXTRA_PREFIX } from '../constants.js';
 import { KeyType, getKeyType } from '../types/index.js';
 import type { KeyTag, ValidatorSet } from '../types/index.js';
 import { compressAggregatedG1, compressRawG1, parseKeyToPoint } from '../utils/bn254.js';
-import { bigintToBytes32, bytesToBigint, bytesToLimbs, sortHexAsc } from '../utils/core.js';
+import { bytesToLimbs, sortHexAsc } from '../utils/core.js';
 import { FIELD_MODULUS, mimcBn254Hash } from '../utils/mimc.js';
-import { hexToBytes } from '../utils/ssz.js';
 
 export const keccakName = (name: string): Hex => {
-    const hex = `0x${Buffer.from(name, 'utf8').toString('hex')}` as Hex;
-    return keccak256(hex);
+    return keccak256(stringToHex(name));
 };
 
 export const computeExtraDataKey = (verificationType: number, name: string): Hex => {
@@ -187,9 +194,9 @@ export const mimcHashValidators = async (tuples: readonly ZkValidatorTuple[]): P
     for (const validator of tuples) {
         if (validator.x === 0n && validator.y === 0n) break;
 
-        const xLimbs = bytesToLimbs(bigintToBytes32(validator.x), 8);
-        const yLimbs = bytesToLimbs(bigintToBytes32(validator.y), 8);
-        const votingPowerField = bytesToBigint(bigintToBytes32(validator.votingPower));
+        const xLimbs = bytesToLimbs(toBytes(validator.x, { size: 32 }), 8);
+        const yLimbs = bytesToLimbs(toBytes(validator.y, { size: 32 }), 8);
+        const votingPowerField = bytesToBigInt(toBytes(validator.votingPower, { size: 32 }));
 
         for (const limb of [...xLimbs, ...yLimbs]) {
             state = modField(mimcBn254Hash(state, limb));
@@ -199,8 +206,8 @@ export const mimcHashValidators = async (tuples: readonly ZkValidatorTuple[]): P
     }
 
     const finalHash = modField(state);
-    const bytes = bigintToBytes32(finalHash);
-    return `0x${Buffer.from(bytes).toString('hex')}` as Hex;
+    const bytes = toBytes(finalHash, { size: 32 });
+    return bytesToHex(bytes);
 };
 
 export const sortExtraData = <T extends { key: Hex }>(items: readonly T[]): T[] =>

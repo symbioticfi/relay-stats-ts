@@ -1,4 +1,4 @@
-import { keccak256, type Hex } from 'viem';
+import { bytesToBigInt, bytesToHex, hexToBytes, keccak256, toBytes, type Hex } from 'viem';
 
 const FP_MODULUS = BigInt('0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47');
 const SQRT_EXPONENT = BigInt('0xc19139cb84c680a6e14116da060561765e05aa45a1c72a34f082305b61f3f52');
@@ -24,26 +24,6 @@ const modPow = (base: bigint, exp: bigint): bigint => {
 
 const modInv = (a: bigint): bigint => modPow(mod(a), FP_MODULUS - 2n);
 
-const fromHex = (hex: Hex): Uint8Array => {
-    const h = hex.startsWith('0x') ? hex.slice(2) : hex;
-    if (h.length % 2 !== 0) throw new Error('Invalid hex');
-    return new Uint8Array(Buffer.from(h, 'hex'));
-};
-
-const toHex = (bytes: Uint8Array): Hex => ('0x' + Buffer.from(bytes).toString('hex')) as Hex;
-
-const bytesToBigIntBE = (bytes: Uint8Array): bigint => {
-    const hex = Buffer.from(bytes).toString('hex');
-    return BigInt('0x' + hex);
-};
-
-const bigIntToBytes32BE = (x: bigint): Uint8Array => {
-    const out = new Uint8Array(32);
-    const hex = x.toString(16).padStart(64, '0');
-    out.set(Buffer.from(hex, 'hex'));
-    return out;
-};
-
 /** @notice Affine BN254 G1 point (null = point at infinity). */
 export type G1 = { x: bigint; y: bigint } | null;
 
@@ -67,21 +47,15 @@ export const compressG1FromXY = (x: bigint, y: bigint): Hex => {
     }
     const compressed = 2n * xMod + flag;
 
-    return toHex(bigIntToBytes32BE(compressed));
+    return bytesToHex(toBytes(compressed, { size: 32 }));
 };
 
 /** @notice Parse uncompressed 64-byte G1 encoding into affine point. */
 export const parseG1Uncompressed = (raw: Hex): G1 => {
-    const bytes = fromHex(raw);
+    const bytes = hexToBytes(raw);
     if (bytes.length < 64) throw new Error('Expected 64-byte uncompressed G1');
-
-    const hex = raw.startsWith('0x') ? raw.slice(2) : raw;
-    const xHex = hex.slice(0, 64);
-    const yHex = hex.slice(64, 128);
-
-    const x = BigInt('0x' + xHex);
-    const y = BigInt('0x' + yHex.padStart(64, '0'));
-
+    const x = bytesToBigInt(bytes.slice(0, 32));
+    const y = bytesToBigInt(bytes.slice(32, 64));
     return { x: mod(x), y: mod(y) };
 };
 
@@ -133,12 +107,12 @@ export const compressRawG1 = (raw: Hex): Hex => {
 };
 
 /** @notice Compute Keccak256 of bytes, returning a hex string. */
-export const keccak = (bytes: Uint8Array): Hex => keccak256(toHex(bytes));
+export const keccak = (bytes: Uint8Array): Hex => keccak256(bytesToHex(bytes));
 
 const parseCompressedToPoint = (raw: Hex): G1 => {
-    const bytes = fromHex(raw);
+    const bytes = hexToBytes(raw);
     if (bytes.length !== 32) throw new Error('Expected 32-byte compressed G1');
-    const v = bytesToBigIntBE(bytes);
+    const v = bytesToBigInt(bytes);
     const x = v >> 1n;
     const flag = v & 1n;
     let y = findYFromX(x);
@@ -150,7 +124,7 @@ const parseCompressedToPoint = (raw: Hex): G1 => {
 
 /** @notice Parse a compressed or uncompressed G1 key into an affine point. */
 export const parseKeyToPoint = (raw: Hex): G1 => {
-    const bytes = fromHex(raw);
+    const bytes = hexToBytes(raw);
     if (bytes.length >= 64) return parseG1Uncompressed(raw);
     if (bytes.length === 32) return parseCompressedToPoint(raw);
     throw new Error('Unsupported G1 key length');

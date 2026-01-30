@@ -5,7 +5,7 @@ import {
     ListCompositeType,
     UintNumberType,
 } from '@chainsafe/ssz';
-import { type Hex, keccak256 } from 'viem';
+import { bytesToHex, hexToBytes, keccak256, toBytes, type Hex } from 'viem';
 import type { ValidatorKey, ValidatorSet } from '../types/index.js';
 
 const UInt8 = new UintNumberType(1);
@@ -60,52 +60,6 @@ export interface ISszValidatorSet {
     Validators: ISszValidator[];
 }
 
-/** @notice Convert 20-byte hex address to bytes. */
-export const addressToBytes = (address: string): Uint8Array => {
-    const hex = address.startsWith('0x') ? address.slice(2) : address;
-    if (hex.length !== 40) {
-        throw new Error('Invalid address length');
-    }
-    return new Uint8Array(Buffer.from(hex.padStart(40, '0'), 'hex'));
-};
-
-/** @notice Convert address bytes back to hex string. */
-export const bytesToAddress = (bytes: Uint8Array): string => {
-    if (bytes.length !== 20) {
-        throw new Error('Invalid address bytes length');
-    }
-    return '0x' + Buffer.from(bytes).toString('hex');
-};
-
-/** @notice Convert bigint to fixed-length byte array. */
-export const bigIntToBytes = (value: bigint, size: number): Uint8Array => {
-    const hex = value.toString(16).padStart(size * 2, '0');
-    return Uint8Array.from(Buffer.from(hex, 'hex'));
-};
-
-/** @notice Convert bigint to 32-byte array. */
-export const bigIntToBytes32 = (value: bigint): Uint8Array => bigIntToBytes(value, 32);
-
-/** @notice Convert 32-byte big-endian array to bigint. */
-export const bytes32ToBigInt = (bytes: Uint8Array): bigint => {
-    if (bytes.length !== 32) {
-        throw new Error('Invalid bytes32 length');
-    }
-    return BigInt('0x' + Buffer.from(bytes).toString('hex'));
-};
-
-/** @notice Convert hex string to bytes. */
-export const hexToBytes = (hex: string): Uint8Array => {
-    const cleanHex = hex.startsWith('0x') ? hex.slice(2) : hex;
-    if (cleanHex.length % 2 !== 0) {
-        throw new Error('Invalid hex string length');
-    }
-    return new Uint8Array(Buffer.from(cleanHex, 'hex'));
-};
-
-/** @notice Convert bytes to hex string with 0x prefix. */
-export const bytesToHex = (bytes: Uint8Array): string => '0x' + Buffer.from(bytes).toString('hex');
-
 /** @notice SSZ serialize a validator set. */
 export const serializeValidatorSet = (validatorSet: ISszValidatorSet): Uint8Array =>
     SszValidatorSet.serialize(validatorSet);
@@ -141,8 +95,8 @@ export const validatorSetToSszValidators = (v: ValidatorSet): ISszValidatorSet =
                 a.vault.toLowerCase().localeCompare(b.vault.toLowerCase())
             );
             return {
-                Operator: addressToBytes(validator.operator),
-                VotingPower: bigIntToBytes32(validator.votingPower),
+                Operator: hexToBytes(validator.operator, { size: 20 }),
+                VotingPower: toBytes(validator.votingPower, { size: 32 }),
                 IsActive: validator.isActive,
                 Keys: keysOrdered.map(k => ({
                     Tag: k.tag,
@@ -150,8 +104,8 @@ export const validatorSetToSszValidators = (v: ValidatorSet): ISszValidatorSet =
                 })),
                 Vaults: vaultsSorted.map(vault => ({
                     ChainId: vault.chainId,
-                    Vault: addressToBytes(vault.vault),
-                    VotingPower: bigIntToBytes32(vault.votingPower),
+                    Vault: hexToBytes(vault.vault, { size: 20 }),
+                    VotingPower: toBytes(vault.votingPower, { size: 32 }),
                 })),
             };
         }),
@@ -162,5 +116,5 @@ export const validatorSetToSszValidators = (v: ValidatorSet): ISszValidatorSet =
 export const sszTreeRoot = (v: ValidatorSet): Hex => {
     const sszType = validatorSetToSszValidators(v);
     const root = SszValidatorSet.hashTreeRoot(sszType);
-    return bytesToHex(root) as Hex;
+    return bytesToHex(root);
 };

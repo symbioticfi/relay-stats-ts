@@ -20,12 +20,6 @@ export {
     validatorSetToSszValidators,
     sszTreeRoot,
     keyPayloadHash,
-    bigIntToBytes32,
-    bytes32ToBigInt,
-    addressToBytes,
-    bytesToAddress,
-    hexToBytes,
-    bytesToHex,
 } from './utils/ssz.js';
 export { compressAggregatedG1, compressRawG1, parseKeyToPoint } from './utils/bn254.js';
 export { FIELD_MODULUS, mimcBn254Hash } from './utils/mimc.js';
