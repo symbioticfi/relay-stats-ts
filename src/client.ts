@@ -439,6 +439,10 @@ export const fetchVotingPowersBatch = async ({
     const requests: MulticallRequest[] = [];
     const operatorCounts: number[] = [];
 
+    if (operatorLists.length === 0) {
+        return operatorCounts.map(() => []);
+    }
+
     for (let i = 0; i < operatorLists.length; i++) {
         const operators = operatorLists[i];
         operatorCounts.push(operators.length);
@@ -450,10 +454,6 @@ export const fetchVotingPowersBatch = async ({
                 args: [operator, '0x' as Hex, timestamps[i]],
             });
         }
-    }
-
-    if (requests.length === 0) {
-        return operatorCounts.map(() => []);
     }
 
     const results = await executeChunkedMulticall<readonly { vault: Address; value: bigint }[]>({

@@ -41,13 +41,7 @@ const config = [
         },
     },
     {
-        files: ['check-diff.ts', 'tsup.config.ts'],
-        rules: {
-            'no-console': 'off',
-        },
-    },
-    {
-        files: ['examples/**/*.{ts,tsx,mts,cts,js,mjs,cjs}'],
+        files: ['check-diff.ts', 'tsup.config.ts', 'examples/**/*.{ts,tsx,mts,cts,js,mjs,cjs}'],
         rules: {
             'no-console': 'off',
         },
@@ -68,16 +62,9 @@ const config = [
             'src/dist/',
             'client/dist/',
 
-            // Database files
-            ':memory:/',
-            '*.db',
-            '*.sqlite',
-            '*.sqlite3',
-
             // Generated files
             'generated/',
             '*.generated.*',
-            'ponder-env.d.ts',
 
             // API client generated files
             'src/api/client/',
@@ -120,20 +107,12 @@ const config = [
             '*.json',
             'resp.json',
 
-            // Ponder specific
-            '/.ponder/',
-            'client/src/types.d.ts',
-
             // Env files
             '.env*.local',
 
             // Temporary files
             '*.tmp',
             '*.temp',
-
-            // Project specific
-            'pglite.js',
-            'pglite.tar.gz',
         ],
     },
 ];
