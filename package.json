@@ -1,6 +1,6 @@
 {
     "name": "@symbioticfi/relay-stats-ts",
-    "version": "0.2.0-alpha.3",
+    "version": "0.3.0",
     "packageManager": "pnpm@9.14.2",
     "description": "TypeScript library for deriving validator sets from Symbiotic network contracts",
     "type": "module",
