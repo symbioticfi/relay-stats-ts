@@ -7,6 +7,7 @@ import {
 } from 'viem';
 import { SETTLEMENT_ABI } from './abis/index.js';
 import { buildSettlementKey } from './cache.js';
+import { executeChunkedMulticall, type MulticallRequest } from './client.js';
 import { ValSetEventKind } from './types/index.js';
 import type {
     CrossChainAddress,
@@ -36,8 +37,74 @@ type BlockTimeEstimate = {
     sampledAt: bigint;
 };
 
+type HeadBlockEstimate = {
+    headNumber: bigint;
+    headTimestamp: number;
+    sampledAtMs: number;
+};
+
 const blockTimeEstimates = new Map<string, BlockTimeEstimate>();
+const headBlockEstimates = new Map<string, HeadBlockEstimate>();
+const headBlockInFlight = new Map<string, Promise<HeadBlockEstimate>>();
 const BLOCK_TIME_CACHE_MAX_DELTA = 1000n;
+const HEAD_BLOCK_CACHE_TTL_LATEST_MS = 1_000;
+const HEAD_BLOCK_CACHE_TTL_FINALIZED_MS = 30_000;
+const DEFAULT_MAX_LOG_BLOCK_SPAN = 50_000n;
+const MIN_LOG_BLOCK_SPAN = 1n;
+const DEFAULT_AVG_BLOCK_TIME_SECONDS = 1;
+const MIN_AVG_BLOCK_TIME_SECONDS = 0.05;
+const maxLogBlockSpanByChain = new Map<string, bigint>();
+
+const isLogRangeTooLargeError = (error: unknown): boolean => {
+    const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+    return (
+        message.includes('range is too large') ||
+        message.includes('block range is too large') ||
+        message.includes('range too wide')
+    );
+};
+
+const resolveHeadBlockEstimate = async (
+    client: PublicClient,
+    chainId: number,
+    blockTag: BlockTagPreference,
+    options?: { forceRefresh?: boolean }
+): Promise<HeadBlockEstimate> => {
+    const key = `${chainId}:${blockTag}`;
+    const ttlMs =
+        blockTag === 'finalized' ? HEAD_BLOCK_CACHE_TTL_FINALIZED_MS : HEAD_BLOCK_CACHE_TTL_LATEST_MS;
+    const now = Date.now();
+    const forceRefresh = options?.forceRefresh ?? false;
+
+    if (!forceRefresh) {
+        const cached = headBlockEstimates.get(key);
+        if (cached && now - cached.sampledAtMs <= ttlMs) {
+            return cached;
+        }
+        const inFlight = headBlockInFlight.get(key);
+        if (inFlight) {
+            return inFlight;
+        }
+    }
+
+    const pending = client
+        .getBlock({ blockTag })
+        .then(head => {
+            const estimate: HeadBlockEstimate = {
+                headNumber: head.number ?? 0n,
+                headTimestamp: Number(head.timestamp),
+                sampledAtMs: Date.now(),
+            };
+            headBlockEstimates.set(key, estimate);
+            return estimate;
+        })
+        .finally(() => {
+            headBlockInFlight.delete(key);
+        });
+
+    headBlockInFlight.set(key, pending);
+    return pending;
+};
 
 const resolveAvgBlockTime = async (
     client: PublicClient,
@@ -62,7 +129,10 @@ const resolveAvgBlockTime = async (
         sampleTimestamp = Number(sampleBlock.timestamp);
     }
     const avg = (headTimestamp - sampleTimestamp) / Math.max(1, Number(sampleCount));
-    const avgBlockTime = Math.max(1, Number.isFinite(avg) ? avg : 1);
+    const avgBlockTime =
+        Number.isFinite(avg) && avg > 0
+            ? Math.max(MIN_AVG_BLOCK_TIME_SECONDS, avg)
+            : DEFAULT_AVG_BLOCK_TIME_SECONDS;
     blockTimeEstimates.set(key, { avgBlockTime, sampledAt: headNumber });
     return avgBlockTime;
 };
@@ -84,63 +154,6 @@ type MulticallSettlementStatus = {
     lastCommittedEpoch: bigint;
 };
 
-const tryFetchSettlementStatusViaMulticall = async (
-    client: PublicClient,
-    settlement: CrossChainAddress,
-    epochNumber: number,
-    blockTag: BlockTagPreference
-): Promise<MulticallSettlementStatus | null> => {
-    try {
-        const results = (await client.multicall({
-            allowFailure: false,
-            blockTag,
-            contracts: [
-                {
-                    address: settlement.address,
-                    abi: SETTLEMENT_ABI,
-                    functionName: 'isValSetHeaderCommittedAt',
-                    args: [epochNumber] as const,
-                },
-                {
-                    address: settlement.address,
-                    abi: SETTLEMENT_ABI,
-                    functionName: 'getValSetHeaderHashAt',
-                    args: [epochNumber] as const,
-                },
-                {
-                    address: settlement.address,
-                    abi: SETTLEMENT_ABI,
-                    functionName: 'getLastCommittedHeaderEpoch',
-                },
-            ],
-        })) as readonly unknown[];
-
-        const [isCommittedRaw, headerHashRaw, lastCommittedEpochRaw] = results;
-        let headerHash: Hex | null = null;
-        if (typeof headerHashRaw === 'string') {
-            headerHash = headerHashRaw as Hex;
-        }
-
-        let lastCommittedEpoch: bigint = 0n;
-        if (typeof lastCommittedEpochRaw === 'bigint') {
-            lastCommittedEpoch = lastCommittedEpochRaw;
-        } else if (
-            typeof lastCommittedEpochRaw === 'number' ||
-            typeof lastCommittedEpochRaw === 'string'
-        ) {
-            lastCommittedEpoch = BigInt(lastCommittedEpochRaw);
-        }
-
-        return {
-            isCommitted: Boolean(isCommittedRaw),
-            headerHash,
-            lastCommittedEpoch,
-        };
-    } catch {
-        return null;
-    }
-};
-
 const tryFetchSettlementStatusesViaMulticall = async (
     client: PublicClient,
     settlement: CrossChainAddress,
@@ -150,23 +163,41 @@ const tryFetchSettlementStatusesViaMulticall = async (
     if (epochNumbers.length === 0) return [];
 
     try {
-        const settlementContract = getSettlementContract(client, settlement);
-        const [perEpochResults, lastCommittedRaw] = await Promise.all([
-            Promise.all(
-                epochNumbers.map(async epochNumber => {
-                    const [isCommittedRaw, headerHashRaw] = await Promise.all([
-                        settlementContract.read.isValSetHeaderCommittedAt([epochNumber], {
-                            blockTag,
-                        }),
-                        settlementContract.read.getValSetHeaderHashAt([epochNumber], {
-                            blockTag,
-                        }),
-                    ]);
-                    return { isCommittedRaw, headerHashRaw };
-                })
-            ),
-            settlementContract.read.getLastCommittedHeaderEpoch({ blockTag }),
-        ]);
+        const requests: MulticallRequest[] = [];
+        for (const epochNumber of epochNumbers) {
+            requests.push({
+                address: settlement.address,
+                abi: SETTLEMENT_ABI,
+                functionName: 'isValSetHeaderCommittedAt',
+                args: [epochNumber] as const,
+            });
+            requests.push({
+                address: settlement.address,
+                abi: SETTLEMENT_ABI,
+                functionName: 'getValSetHeaderHashAt',
+                args: [epochNumber] as const,
+            });
+        }
+        requests.push({
+            address: settlement.address,
+            abi: SETTLEMENT_ABI,
+            functionName: 'getLastCommittedHeaderEpoch',
+            args: [] as const,
+        });
+
+        const results = await executeChunkedMulticall<unknown>({
+            client,
+            requests,
+            blockTag,
+        });
+        const expectedLength = epochNumbers.length * 2 + 1;
+        if (results.length !== expectedLength) {
+            throw new Error(
+                `Settlement status multicall length mismatch: expected ${expectedLength}, got ${results.length}`
+            );
+        }
+
+        const lastCommittedRaw = results[results.length - 1];
 
         let lastCommittedEpoch: bigint = 0n;
         if (typeof lastCommittedRaw === 'bigint') {
@@ -177,13 +208,15 @@ const tryFetchSettlementStatusesViaMulticall = async (
 
         const statuses: MulticallSettlementStatus[] = [];
         for (let i = 0; i < epochNumbers.length; i++) {
-            const { isCommittedRaw, headerHashRaw } = perEpochResults[i];
+            const isCommittedRaw = results[i * 2];
+            const headerHashRaw = results[i * 2 + 1];
+            const isCommitted = Boolean(isCommittedRaw);
             let headerHash: Hex | null = null;
-            if (typeof headerHashRaw === 'string') {
+            if (isCommitted && typeof headerHashRaw === 'string') {
                 headerHash = headerHashRaw as Hex;
             }
             statuses.push({
-                isCommitted: Boolean(isCommittedRaw),
+                isCommitted,
                 headerHash,
                 lastCommittedEpoch,
             });
@@ -261,61 +294,16 @@ export const determineValSetStatus = async (
     epoch: number,
     preferFinalized: boolean
 ): Promise<ValSetStatus> => {
-    const details: SettlementValSetStatus[] = [];
-
-    const blockTag = blockTagFromFinality(preferFinalized);
-    const epochNumber = Number(epoch);
-
-    for (const settlement of settlements) {
-        const client = clientFactory(settlement.chainId);
-        const detail: SettlementValSetStatus = {
-            settlement,
-            committed: false,
-            headerHash: null,
-            lastCommittedEpoch: null,
-        };
-
-        const multiResult = await tryFetchSettlementStatusViaMulticall(
-            client,
-            settlement,
-            epochNumber,
-            blockTag
-        );
-
-        if (multiResult) {
-            const committed = Boolean(multiResult.isCommitted);
-            detail.committed = committed;
-            detail.headerHash = multiResult.headerHash;
-            detail.lastCommittedEpoch = Number(multiResult.lastCommittedEpoch);
-        } else {
-            const settlementContract = getSettlementContract(client, settlement);
-            const isCommitted = await settlementContract.read.isValSetHeaderCommittedAt(
-                [epochNumber],
-                {
-                    blockTag,
-                }
-            );
-            detail.committed = Boolean(isCommitted);
-
-            if (detail.committed) {
-                const headerHash = (await settlementContract.read.getValSetHeaderHashAt(
-                    [epochNumber],
-                    {
-                        blockTag,
-                    }
-                )) as Hex;
-                detail.headerHash = headerHash ?? null;
-            }
-
-            const lastCommittedEpoch = await settlementContract.read.getLastCommittedHeaderEpoch({
-                blockTag,
-            });
-            detail.lastCommittedEpoch = Number(lastCommittedEpoch);
-        }
-
-        details.push(detail);
+    const [status] = await determineValSetStatuses(
+        clientFactory,
+        settlements,
+        [epoch],
+        preferFinalized
+    );
+    if (!status) {
+        throw new Error(`Unable to determine validator set status for epoch ${epoch}`);
     }
-    return buildValSetStatusFromDetails(epoch, details);
+    return status;
 };
 
 export const determineValSetStatuses = async (
@@ -430,34 +418,43 @@ export const fetchSettlementEventsRange = async (
 ): Promise<Map<number, ValSetLogEvent>> => {
     const startEpoch = Math.min(fromEpoch, toEpoch);
     const endEpoch = Math.max(fromEpoch, toEpoch);
-    const rangeSize = Math.max(1, endEpoch - startEpoch + 1);
-    const padEpochs = Math.max(2, Math.ceil(rangeSize * 0.1));
-
-    const windowStart = Math.max(0, epochStartFrom - padEpochs * epochDuration);
-    const windowEnd = epochStartTo + (padEpochs + 1) * epochDuration;
+    // Keep a tight timestamp window to reduce eth_getLogs spans for short epoch ranges.
+    const safetySeconds = Math.max(300, Math.ceil(epochDuration * 0.1));
+    const windowStart = Math.max(0, epochStartFrom - safetySeconds);
+    const windowEnd = epochStartTo + epochDuration + safetySeconds;
     const blockTag = blockTagFromFinality(finalized);
+    const spanCacheKey = `${settlement.chainId}:${blockTag}`;
 
-    const head = await client.getBlock({ blockTag });
-    const headNumber = head.number ?? 0n;
-    const headTimestamp = Number(head.timestamp);
-    const avgBlockTime = await resolveAvgBlockTime(
-        client,
-        settlement.chainId,
-        blockTag,
-        headNumber,
-        headTimestamp
-    );
+    const computeBlockWindow = async (forceRefresh: boolean): Promise<{
+        fromBlock: bigint;
+        toBlock: bigint;
+    }> => {
+        const { headNumber, headTimestamp } = await resolveHeadBlockEstimate(
+            client,
+            settlement.chainId,
+            blockTag,
+            { forceRefresh }
+        );
+        const avgBlockTime = await resolveAvgBlockTime(
+            client,
+            settlement.chainId,
+            blockTag,
+            headNumber,
+            headTimestamp
+        );
 
-    const startOffset = Math.max(0, headTimestamp - windowStart);
-    const endOffset = Math.max(0, headTimestamp - windowEnd);
-    let fromBlock = headNumber - BigInt(Math.ceil(startOffset / avgBlockTime));
-    let toBlock = headNumber - BigInt(Math.floor(endOffset / avgBlockTime));
+        const startOffset = Math.max(0, headTimestamp - windowStart);
+        const endOffset = Math.max(0, headTimestamp - windowEnd);
+        let fromBlock = headNumber - BigInt(Math.ceil(startOffset / avgBlockTime));
+        let toBlock = headNumber - BigInt(Math.floor(endOffset / avgBlockTime));
 
-    if (fromBlock < 0n) fromBlock = 0n;
-    if (toBlock < 0n) toBlock = 0n;
-    if (fromBlock > headNumber) fromBlock = headNumber;
-    if (toBlock > headNumber) toBlock = headNumber;
-    if (fromBlock > toBlock) [fromBlock, toBlock] = [toBlock, fromBlock];
+        if (fromBlock < 0n) fromBlock = 0n;
+        if (toBlock < 0n) toBlock = 0n;
+        if (fromBlock > headNumber) fromBlock = headNumber;
+        if (toBlock > headNumber) toBlock = headNumber;
+        if (fromBlock > toBlock) [fromBlock, toBlock] = [toBlock, fromBlock];
+        return { fromBlock, toBlock };
+    };
 
     const filteredEvents = SETTLEMENT_ABI.filter(
         (item): item is Extract<(typeof SETTLEMENT_ABI)[number], { type: 'event' }> =>
@@ -465,12 +462,71 @@ export const fetchSettlementEventsRange = async (
             (item.name === 'SetGenesis' || item.name === 'CommitValSetHeader')
     );
 
-    const logs = await client.getLogs({
-        address: settlement.address,
-        events: filteredEvents,
-        fromBlock,
-        toBlock,
-    });
+    const loadLogs = async (fromBlock: bigint, toBlock: bigint): Promise<any[]> => {
+        const cachedMaxSpan = maxLogBlockSpanByChain.get(spanCacheKey);
+        const initialMaxSpan =
+            cachedMaxSpan && cachedMaxSpan > 0n ? cachedMaxSpan : DEFAULT_MAX_LOG_BLOCK_SPAN;
+
+        const readWindow = async (
+            windowFrom: bigint,
+            windowTo: bigint,
+            maxSpan: bigint
+        ): Promise<any[]> => {
+            if (windowFrom > windowTo) return [];
+
+            if (windowTo - windowFrom <= maxSpan) {
+                try {
+                    return await client.getLogs({
+                        address: settlement.address,
+                        events: filteredEvents,
+                        fromBlock: windowFrom,
+                        toBlock: windowTo,
+                    });
+                } catch (error) {
+                    if (!isLogRangeTooLargeError(error) || maxSpan <= 1n) {
+                        throw error;
+                    }
+                    const nextSpan = maxSpan / 2n;
+                    const resolvedNextSpan = nextSpan > 0n ? nextSpan : MIN_LOG_BLOCK_SPAN;
+                    const knownMaxSpan = maxLogBlockSpanByChain.get(spanCacheKey);
+                    if (!knownMaxSpan || resolvedNextSpan < knownMaxSpan) {
+                        maxLogBlockSpanByChain.set(spanCacheKey, resolvedNextSpan);
+                    }
+                    return readWindow(windowFrom, windowTo, resolvedNextSpan);
+                }
+            }
+
+            const logs: any[] = [];
+            let chunkFrom = windowFrom;
+            while (chunkFrom <= windowTo) {
+                const chunkTo = chunkFrom + maxSpan;
+                logs.push(
+                    ...(await readWindow(
+                        chunkFrom,
+                        chunkTo > windowTo ? windowTo : chunkTo,
+                        maxSpan
+                    ))
+                );
+                chunkFrom = chunkTo + 1n;
+            }
+            return logs;
+        };
+
+        return readWindow(fromBlock, toBlock, initialMaxSpan);
+    };
+
+    const primaryWindow = await computeBlockWindow(false);
+    let logs: any[];
+    try {
+        logs = await loadLogs(primaryWindow.fromBlock, primaryWindow.toBlock);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.includes('beyond current head block')) {
+            throw error;
+        }
+        const refreshedWindow = await computeBlockWindow(true);
+        logs = await loadLogs(refreshedWindow.fromBlock, refreshedWindow.toBlock);
+    }
 
     const store = new Map<number, { event: ValSetLogEvent; logIndex: number | null }>();
 

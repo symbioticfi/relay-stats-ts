@@ -4,6 +4,35 @@ import type { CacheInterface } from './types/index.js';
 
 const logger = console;
 
+export const createInMemoryCache = (): CacheInterface => {
+    const buckets = new Map<number, Map<string, unknown>>();
+
+    return {
+        async get(epoch: number, key: string): Promise<unknown | null> {
+            return buckets.get(epoch)?.get(key) ?? null;
+        },
+        async set(epoch: number, key: string, value: unknown): Promise<void> {
+            let bucket = buckets.get(epoch);
+            if (!bucket) {
+                bucket = new Map<string, unknown>();
+                buckets.set(epoch, bucket);
+            }
+            bucket.set(key, value);
+        },
+        async delete(epoch: number, key: string): Promise<void> {
+            const bucket = buckets.get(epoch);
+            if (!bucket) return;
+            bucket.delete(key);
+            if (bucket.size === 0) {
+                buckets.delete(epoch);
+            }
+        },
+        async clear(epoch: number): Promise<void> {
+            buckets.delete(epoch);
+        },
+    };
+};
+
 const logCacheError = (
     action: string,
     namespace: string,
