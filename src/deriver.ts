@@ -36,10 +36,7 @@ import {
     CACHE_PERSISTENT_EPOCH,
 } from './constants.js';
 import { buildSimpleExtraData, buildZkExtraData } from './extra-data/index.js';
-import {
-    determineValSetStatuses,
-    fetchSettlementEventsRange,
-} from './settlement.js';
+import { determineValSetStatuses, fetchSettlementEventsRange } from './settlement.js';
 import type {
     AggregatorExtraDataEntry,
     CacheInterface,

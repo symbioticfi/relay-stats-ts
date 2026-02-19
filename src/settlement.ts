@@ -72,7 +72,9 @@ const resolveHeadBlockEstimate = async (
 ): Promise<HeadBlockEstimate> => {
     const key = `${chainId}:${blockTag}`;
     const ttlMs =
-        blockTag === 'finalized' ? HEAD_BLOCK_CACHE_TTL_FINALIZED_MS : HEAD_BLOCK_CACHE_TTL_LATEST_MS;
+        blockTag === 'finalized'
+            ? HEAD_BLOCK_CACHE_TTL_FINALIZED_MS
+            : HEAD_BLOCK_CACHE_TTL_LATEST_MS;
     const now = Date.now();
     const forceRefresh = options?.forceRefresh ?? false;
 
@@ -425,7 +427,9 @@ export const fetchSettlementEventsRange = async (
     const blockTag = blockTagFromFinality(finalized);
     const spanCacheKey = `${settlement.chainId}:${blockTag}`;
 
-    const computeBlockWindow = async (forceRefresh: boolean): Promise<{
+    const computeBlockWindow = async (
+        forceRefresh: boolean
+    ): Promise<{
         fromBlock: bigint;
         toBlock: bigint;
     }> => {
