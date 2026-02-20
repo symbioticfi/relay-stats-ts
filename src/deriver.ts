@@ -4,6 +4,7 @@ import {
     buildSettlementKey,
     buildSettlementStatusKey,
     createCacheEpochTracker,
+    createInMemoryCache,
     createCacheNamespace,
     type CacheEpochTracker,
     type CacheNamespaceAccessor,
@@ -35,11 +36,7 @@ import {
     CACHE_PERSISTENT_EPOCH,
 } from './constants.js';
 import { buildSimpleExtraData, buildZkExtraData } from './extra-data/index.js';
-import {
-    buildValSetStatusFromEvents,
-    determineValSetStatus,
-    fetchSettlementEventsRange,
-} from './settlement.js';
+import { determineValSetStatuses, fetchSettlementEventsRange } from './settlement.js';
 import type {
     AggregatorExtraDataEntry,
     CacheInterface,
@@ -74,6 +71,7 @@ export interface ValidatorSetDeriverConfig {
     driverAddress: CrossChainAddress;
     cache?: CacheInterface | null;
     maxSavedEpochs?: number;
+    validateChainsOnCreate?: boolean;
 }
 
 // === Public API ===
@@ -83,7 +81,9 @@ export class ValidatorSetDeriver {
         const deriver = new ValidatorSetDeriver(config);
         await deriver.ensureInitialized();
 
-        await deriver.validateRequiredChains();
+        if (config.validateChainsOnCreate) {
+            await deriver.validateRequiredChains();
+        }
 
         return deriver;
     }
@@ -102,10 +102,11 @@ export class ValidatorSetDeriver {
     private readonly cacheTracker: CacheEpochTracker;
     private readonly initializedPromise: Promise<void>;
     private readonly rpcUrls: readonly string[];
+    private readonly lastCommittedInFlight = new Map<string, Promise<number>>();
 
     constructor(config: ValidatorSetDeriverConfig) {
         this.driverAddress = config.driverAddress;
-        this.cache = config.cache === undefined ? null : config.cache;
+        this.cache = config.cache === undefined ? createInMemoryCache() : config.cache;
         const cachePrefix = `driver_${this.driverAddress.chainId}_${this.driverAddress.address.toLowerCase()}`;
         this.cacheNs = {
             config: createCacheNamespace(this.cache, `${cachePrefix}:${CACHE_NAMESPACE.CONFIG}`),
@@ -284,8 +285,8 @@ export class ValidatorSetDeriver {
         const uniqueEpochs = Array.from(new Set(targetEpochs));
 
         const includeNetworkData = options?.includeNetworkData ?? false;
-        const includeSettlementStatus = options?.includeSettlementStatus ?? true;
-        const includeCollateralMetadata = options?.includeCollateralMetadata ?? true;
+        const includeSettlementStatus = options?.includeSettlementStatus ?? false;
+        const includeCollateralMetadata = options?.includeCollateralMetadata ?? false;
         const includeValSetEvent = options?.includeValSetEvent ?? false;
         const settlementOverride = options?.settlement;
         const aggregatorKeyTags = options?.aggregatorKeyTags;
@@ -320,7 +321,25 @@ export class ValidatorSetDeriver {
                 }
             }
 
-            if (uniqueSettlements.size > 0) {
+            if (includeValSetEvent && uniqueSettlements.size > 0) {
+                let derivedEpochDuration: number | undefined;
+                if (fromEpoch !== toEpoch) {
+                    const startFrom = configEntries.get(fromEpoch)?.epochStart;
+                    const startTo = configEntries.get(toEpoch)?.epochStart;
+                    if (
+                        typeof startFrom === 'number' &&
+                        Number.isFinite(startFrom) &&
+                        typeof startTo === 'number' &&
+                        Number.isFinite(startTo)
+                    ) {
+                        const spanEpochs = Math.max(1, toEpoch - fromEpoch);
+                        const estimated = Math.floor((startTo - startFrom) / spanEpochs);
+                        if (estimated > 0) {
+                            derivedEpochDuration = estimated;
+                        }
+                    }
+                }
+
                 const { epochStartFrom, epochStartTo, epochDuration } =
                     await this.resolveEpochWindow({
                         fromEpoch,
@@ -328,6 +347,7 @@ export class ValidatorSetDeriver {
                         finalized,
                         epochStartFrom: configEntries.get(fromEpoch)?.epochStart,
                         epochStartTo: configEntries.get(toEpoch)?.epochStart,
+                        epochDuration: derivedEpochDuration,
                     });
                 eventsBySettlement = await this.fetchSettlementEventsByRange({
                     settlements: Array.from(uniqueSettlements.values()),
@@ -343,9 +363,7 @@ export class ValidatorSetDeriver {
                 statusByEpoch = await this.loadValSetStatusBatch({
                     settlementsByEpoch,
                     epochs: uniqueEpochs,
-                    epochRange,
                     finalized,
-                    eventsBySettlement,
                 });
                 this.applyValidatorSetStatuses(validatorSets, statusByEpoch);
                 await this.updateCachedValidatorSets(validatorSets, statusByEpoch, finalized);
@@ -497,24 +515,14 @@ export class ValidatorSetDeriver {
         epochRange: EpochRange | undefined,
         finalized: boolean
     ): Promise<{ currentEpoch: number; targetEpochs: number[] }> {
-        const currentEpoch = await this.getCurrentEpoch(finalized);
         if (!epochRange) {
+            const currentEpoch = await this.getCurrentEpoch(finalized);
             return { currentEpoch, targetEpochs: [currentEpoch] };
         }
 
-        const { from, to } = this.normalizeEpochRange(epochRange);
-        if (to > currentEpoch) {
-            throw new Error(
-                `Requested epoch ${to} is not yet available on-chain (latest is ${currentEpoch}).`
-            );
-        }
-
-        const targetEpochs: number[] = [];
-        for (let epoch = from; epoch <= to; epoch++) {
-            targetEpochs.push(epoch);
-        }
-
-        return { currentEpoch, targetEpochs };
+        const { to } = this.normalizeEpochRange(epochRange);
+        const targetEpochs = this.expandEpochRange(epochRange);
+        return { currentEpoch: to, targetEpochs };
     }
 
     private getVerificationMode(config: NetworkConfig): AggregatorMode {
@@ -584,50 +592,39 @@ export class ValidatorSetDeriver {
             params;
         const eventsBySettlement = new Map<string, Map<number, ValSetLogEvent>>();
         if (settlements.length === 0) return eventsBySettlement;
+        const startEpoch = Math.min(epochRange.from, epochRange.to);
+        const endEpoch = Math.max(epochRange.from, epochRange.to);
 
         await Promise.all(
             settlements.map(async settlement => {
                 const client = this.getClient(settlement.chainId);
+                const settlementKey = buildSettlementKey(settlement);
+
+                const lastCommittedEpoch = await this.getSettlementLastCommittedEpoch(
+                    settlement,
+                    finalized
+                );
+                if (!Number.isFinite(lastCommittedEpoch) || lastCommittedEpoch < startEpoch) {
+                    eventsBySettlement.set(settlementKey, new Map());
+                    return;
+                }
+
+                const cappedToEpoch = Math.min(endEpoch, lastCommittedEpoch);
                 const events = await fetchSettlementEventsRange(
                     client,
                     settlement,
-                    epochRange.from,
-                    epochRange.to,
+                    startEpoch,
+                    cappedToEpoch,
                     epochStartFrom,
                     epochStartTo,
                     epochDuration,
                     finalized
                 );
-                eventsBySettlement.set(buildSettlementKey(settlement), events);
+                eventsBySettlement.set(settlementKey, events);
             })
         );
 
         return eventsBySettlement;
-    }
-
-    private async updateValidatorSetStatus(
-        validatorSet: ValidatorSet,
-        settlements: readonly CrossChainAddress[],
-        epoch: number,
-        finalized: boolean
-    ): Promise<ValSetStatus> {
-        const statusInfo = await this.loadValSetStatus({
-            settlements,
-            epoch,
-            finalized,
-        });
-
-        validatorSet.status = statusInfo.status;
-        validatorSet.integrity = statusInfo.integrity;
-
-        if (statusInfo.integrity === 'invalid') {
-            throw new Error(
-                `Settlement integrity check failed for epoch ${epoch}. ` +
-                    `Header hashes do not match across settlements, indicating a critical issue with the validator set.`
-            );
-        }
-
-        return statusInfo;
     }
 
     private applyValidatorSetStatuses(
@@ -747,46 +744,12 @@ export class ValidatorSetDeriver {
         return entries;
     }
 
-    private async loadValSetStatus(params: {
-        settlements: readonly CrossChainAddress[];
-        epoch: number;
-        finalized: boolean;
-    }): Promise<ValSetStatus> {
-        const { settlements, epoch, finalized } = params;
-        const key = buildSettlementStatusKey(settlements);
-
-        if (finalized) {
-            const cached = await this.cacheNs.valsetStatus.get(epoch, key);
-            if (cached && this.isValSetStatus(cached) && cached.status === 'committed') {
-                return cached;
-            }
-        }
-
-        const status = await determineValSetStatus(
-            chainId => this.getClient(chainId),
-            settlements,
-            epoch,
-            finalized
-        );
-
-        if (finalized) {
-            await this.cacheNs.valsetStatus.set(epoch, key, status);
-            await this.cacheTracker.noteEpoch(epoch);
-        }
-
-        return status;
-    }
-
     private async loadValSetStatusBatch(params: {
         settlementsByEpoch: Map<number, readonly CrossChainAddress[]>;
-        epochs?: readonly number[];
-        epochRange?: EpochRange;
+        epochs: readonly number[];
         finalized: boolean;
-        eventsBySettlement?: Map<string, Map<number, ValSetLogEvent>>;
     }): Promise<Map<number, ValSetStatus>> {
-        const { settlementsByEpoch, finalized } = params;
-        const epochs =
-            params.epochs ?? (params.epochRange ? this.expandEpochRange(params.epochRange) : []);
+        const { settlementsByEpoch, epochs, finalized } = params;
         if (epochs.length === 0) {
             return new Map<number, ValSetStatus>();
         }
@@ -819,78 +782,39 @@ export class ValidatorSetDeriver {
             return results;
         }
 
-        const fromEpoch = Math.min(...refreshEpochs);
-        const toEpoch = Math.max(...refreshEpochs);
-        const epochRange = params.epochRange ?? { from: fromEpoch, to: toEpoch };
-
-        const uniqueSettlements = new Map<string, CrossChainAddress>();
+        const groupedEpochs = new Map<
+            string,
+            { settlements: readonly CrossChainAddress[]; epochs: number[] }
+        >();
         for (const epoch of refreshEpochs) {
             const settlements = settlementsByEpoch.get(epoch) ?? [];
-            for (const settlement of settlements) {
-                uniqueSettlements.set(buildSettlementKey(settlement), settlement);
-            }
-        }
-
-        const loadLastCommittedBySettlement = async (): Promise<Map<string, number>> => {
-            const lastCommittedBySettlement = new Map<string, number>();
-            if (uniqueSettlements.size === 0) {
-                return lastCommittedBySettlement;
-            }
-            const blockTag = blockTagFromFinality(finalized);
-            await Promise.all(
-                Array.from(uniqueSettlements.values()).map(async settlement => {
-                    const client = this.getClient(settlement.chainId);
-                    const lastCommittedRaw = await client.readContract({
-                        address: settlement.address,
-                        abi: SETTLEMENT_ABI,
-                        functionName: 'getLastCommittedHeaderEpoch',
-                        args: [],
-                        blockTag,
-                    });
-                    lastCommittedBySettlement.set(
-                        buildSettlementKey(settlement),
-                        Number(lastCommittedRaw)
-                    );
-                })
-            );
-            return lastCommittedBySettlement;
-        };
-
-        let eventsBySettlement = params.eventsBySettlement;
-        if (!eventsBySettlement) {
-            if (uniqueSettlements.size === 0) {
-                eventsBySettlement = new Map<string, Map<number, ValSetLogEvent>>();
+            const groupKey = buildSettlementStatusKey(settlements);
+            const existing = groupedEpochs.get(groupKey);
+            if (existing) {
+                existing.epochs.push(epoch);
             } else {
-                const scanWindow = await this.resolveEpochWindow({
-                    fromEpoch: epochRange.from,
-                    toEpoch: epochRange.to,
-                    finalized,
-                });
-                eventsBySettlement = await this.fetchSettlementEventsByRange({
-                    settlements: Array.from(uniqueSettlements.values()),
-                    epochRange,
-                    epochStartFrom: scanWindow.epochStartFrom,
-                    epochStartTo: scanWindow.epochStartTo,
-                    epochDuration: scanWindow.epochDuration,
-                    finalized,
-                });
+                groupedEpochs.set(groupKey, { settlements, epochs: [epoch] });
             }
         }
-        if (!eventsBySettlement) {
-            eventsBySettlement = new Map<string, Map<number, ValSetLogEvent>>();
-        }
 
-        const lastCommittedBySettlement = await loadLastCommittedBySettlement();
-        for (const epoch of refreshEpochs) {
-            const settlements = settlementsByEpoch.get(epoch) ?? [];
-            const status = buildValSetStatusFromEvents({
-                epoch,
-                settlements,
-                eventsBySettlement,
-                lastCommittedBySettlement,
-            });
-            results.set(epoch, status);
-        }
+        await Promise.all(
+            Array.from(groupedEpochs.values()).map(async group => {
+                const statuses = await determineValSetStatuses(
+                    chainId => this.getClient(chainId),
+                    group.settlements,
+                    group.epochs,
+                    finalized
+                );
+                if (statuses.length !== group.epochs.length) {
+                    throw new Error(
+                        `ValSet status batch result length mismatch: expected ${group.epochs.length}, got ${statuses.length}`
+                    );
+                }
+                for (let i = 0; i < group.epochs.length; i++) {
+                    results.set(group.epochs[i], statuses[i]!);
+                }
+            })
+        );
 
         if (finalized) {
             await Promise.all(
@@ -904,6 +828,36 @@ export class ValidatorSetDeriver {
         }
 
         return results;
+    }
+
+    private async getSettlementLastCommittedEpoch(
+        settlement: CrossChainAddress,
+        finalized: boolean
+    ): Promise<number> {
+        const blockTag = blockTagFromFinality(finalized);
+        const key = `${buildSettlementKey(settlement)}:${blockTag}`;
+
+        const inFlight = this.lastCommittedInFlight.get(key);
+        if (inFlight) {
+            return inFlight;
+        }
+
+        const pending = (async () => {
+            const client = this.getClient(settlement.chainId);
+            const lastCommittedRaw = await client.readContract({
+                address: settlement.address,
+                abi: SETTLEMENT_ABI,
+                functionName: 'getLastCommittedHeaderEpoch',
+                args: [],
+                blockTag,
+            });
+            return Number(lastCommittedRaw);
+        })().finally(() => {
+            this.lastCommittedInFlight.delete(key);
+        });
+
+        this.lastCommittedInFlight.set(key, pending);
+        return pending;
     }
 
     private async loadAggregatorsExtraData(params: {
@@ -1315,7 +1269,7 @@ export class ValidatorSetDeriver {
 
         const statusByEpoch = await this.loadValSetStatusBatch({
             settlementsByEpoch,
-            epochRange,
+            epochs: uniqueEpochs,
             finalized,
         });
 
@@ -1367,13 +1321,9 @@ export class ValidatorSetDeriver {
             }
         }
 
-        const resolvedRange = options?.epochRange ?? {
-            from: targetEpochs[0],
-            to: targetEpochs[targetEpochs.length - 1],
-        };
         const statusByEpoch = await this.loadValSetStatusBatch({
             settlementsByEpoch,
-            epochRange: resolvedRange,
+            epochs: uniqueEpochs,
             finalized,
         });
 

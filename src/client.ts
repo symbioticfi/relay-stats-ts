@@ -185,18 +185,28 @@ export const readDriverConfigAtBatch = async (
 ): Promise<unknown[]> => {
     if (epochStarts.length === 0) return [];
 
-    const requests: MulticallRequest[] = epochStarts.map(epochStart => ({
+    const uniqueEpochStarts: number[] = [];
+    const epochIndexByStart = new Map<number, number>();
+    for (const epochStart of epochStarts) {
+        if (!epochIndexByStart.has(epochStart)) {
+            epochIndexByStart.set(epochStart, uniqueEpochStarts.length);
+            uniqueEpochStarts.push(epochStart);
+        }
+    }
+
+    const requests: MulticallRequest[] = uniqueEpochStarts.map(epochStart => ({
         address: driver.address,
         abi: VALSET_DRIVER_ABI,
         functionName: 'getConfigAt',
         args: [epochStart],
     }));
 
-    return await executeChunkedMulticall<unknown>({
+    const uniqueResults = await executeChunkedMulticall<unknown>({
         client,
         requests,
         blockTag,
     });
+    return epochStarts.map(epochStart => uniqueResults[epochIndexByStart.get(epochStart)!]);
 };
 
 /** @notice Execute multicall requests using viem batching defaults. */
@@ -211,27 +221,35 @@ export const executeChunkedMulticall = async <T>({
 }): Promise<T[]> => {
     if (requests.length === 0) return [];
 
-    let rawResult: readonly unknown[];
-    try {
-        rawResult = (await client.multicall({
-            allowFailure: false,
-            blockTag,
-            contracts: requests.map(item => ({
-                address: item.address,
-                abi: item.abi,
-                functionName: item.functionName as never,
-                args: item.args,
-            })),
-        })) as readonly unknown[];
-    } catch (error) {
-        const first = requests[0];
-        const label = first ? `${first.functionName} @ ${first.address}` : 'multicall';
-        const message = error instanceof Error ? error.message : String(error);
-        // eslint-disable-next-line no-console
-        console.warn(`Multicall failed for ${label} (requests ${requests.length}): ${message}`);
-        throw error;
-    }
+    const run = async (batch: readonly MulticallRequest[]): Promise<readonly unknown[]> => {
+        try {
+            return (await client.multicall({
+                allowFailure: false,
+                blockTag,
+                contracts: batch.map(item => ({
+                    address: item.address,
+                    abi: item.abi,
+                    functionName: item.functionName as never,
+                    args: item.args,
+                })),
+            })) as readonly unknown[];
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (batch.length > 1) {
+                const mid = Math.ceil(batch.length / 2);
+                const left = await run(batch.slice(0, mid));
+                const right = await run(batch.slice(mid));
+                return [...left, ...right];
+            }
+            const first = batch[0];
+            const label = first ? `${first.functionName} @ ${first.address}` : 'multicall';
+            // eslint-disable-next-line no-console
+            console.warn(`Multicall failed for ${label} (requests ${batch.length}): ${message}`);
+            throw error;
+        }
+    };
 
+    const rawResult = await run(requests);
     return rawResult as unknown as T[];
 };
 
@@ -421,69 +439,31 @@ export const fetchVotingPowersBatch = async ({
         );
     }
 
-    const operatorResults = await executeChunkedMulticall<readonly Address[]>({
+    const results = await executeChunkedMulticall<
+        readonly {
+            operator: Address;
+            vaults: readonly { vault: Address; value: bigint }[];
+        }[]
+    >({
         client,
         requests: timestamps.map(timestampSeconds => ({
             address: provider.address,
             abi: VOTING_POWER_PROVIDER_ABI,
-            functionName: 'getOperatorsAt',
-            args: [timestampSeconds],
+            functionName: 'getVotingPowersAt',
+            args: [[], timestampSeconds],
         })),
         blockTag,
     });
 
-    const operatorLists = operatorResults.map(operators =>
-        Array.from(operators ?? [], operator => operator as Address)
+    return results.map(votingPowers =>
+        (votingPowers ?? []).map(vp => ({
+            operator: vp.operator,
+            vaults: vp.vaults.map(v => ({
+                vault: v.vault,
+                votingPower: v.value,
+            })),
+        }))
     );
-
-    const requests: MulticallRequest[] = [];
-    const operatorCounts: number[] = [];
-
-    if (operatorLists.length === 0) {
-        return operatorCounts.map(() => []);
-    }
-
-    for (let i = 0; i < operatorLists.length; i++) {
-        const operators = operatorLists[i];
-        operatorCounts.push(operators.length);
-        for (const operator of operators) {
-            requests.push({
-                address: provider.address,
-                abi: VOTING_POWER_PROVIDER_ABI,
-                functionName: 'getOperatorVotingPowersAt',
-                args: [operator, '0x' as Hex, timestamps[i]],
-            });
-        }
-    }
-
-    const results = await executeChunkedMulticall<readonly { vault: Address; value: bigint }[]>({
-        client,
-        requests,
-        blockTag,
-    });
-
-    const output: OperatorVotingPower[][] = [];
-    let offset = 0;
-
-    for (let i = 0; i < operatorCounts.length; i++) {
-        const operators = operatorLists[i];
-        const votingPowers: OperatorVotingPower[] = [];
-
-        for (const operator of operators) {
-            const vaults = results[offset++] ?? [];
-            votingPowers.push({
-                operator,
-                vaults: Array.from(vaults, v => ({
-                    vault: v.vault as Address,
-                    votingPower: v.value,
-                })),
-            });
-        }
-
-        output.push(votingPowers);
-    }
-
-    return output;
 };
 
 export const fetchKeysAt = async ({
@@ -607,71 +587,31 @@ export const fetchKeysAtBatch = async ({
         return fetchDirect();
     }
 
-    const operatorResults = await executeChunkedMulticall<readonly Address[]>({
+    const results = await executeChunkedMulticall<
+        readonly {
+            operator: Address;
+            keys: readonly { tag: number | bigint; payload: Hex }[];
+        }[]
+    >({
         client,
         requests: timestampNumbers.map(timestampNumber => ({
             address: provider.address,
             abi: KEY_REGISTRY_ABI,
-            functionName: 'getKeysOperatorsAt',
+            functionName: 'getKeysAt',
             args: [timestampNumber],
         })),
         blockTag,
     });
 
-    const operatorLists = operatorResults.map(operators =>
-        Array.from(operators ?? [], operator => operator as Address)
+    return results.map(entries =>
+        (entries ?? []).map(k => ({
+            operator: k.operator,
+            keys: Array.from(k.keys, key => ({
+                tag: typeof key.tag === 'bigint' ? Number(key.tag) : key.tag,
+                payload: key.payload,
+            })),
+        }))
     );
-
-    const requests: MulticallRequest[] = [];
-    const operatorCounts: number[] = [];
-
-    for (let i = 0; i < operatorLists.length; i++) {
-        const operators = operatorLists[i];
-        operatorCounts.push(operators.length);
-        for (const operator of operators) {
-            requests.push({
-                address: provider.address,
-                abi: KEY_REGISTRY_ABI,
-                functionName: 'getKeysAt',
-                args: [operator, timestampNumbers[i]],
-            });
-        }
-    }
-
-    if (requests.length === 0) {
-        return operatorCounts.map(() => []);
-    }
-
-    const results = await executeChunkedMulticall<
-        readonly { tag: number | bigint; payload: Hex }[]
-    >({
-        client,
-        requests,
-        blockTag,
-    });
-
-    const output: OperatorWithKeys[][] = [];
-    let offset = 0;
-
-    for (let i = 0; i < operatorCounts.length; i++) {
-        const operators = operatorLists[i];
-        const operatorKeys: OperatorWithKeys[] = [];
-
-        for (const operator of operators) {
-            const rawKeys = results[offset++] ?? [];
-            operatorKeys.push({
-                operator,
-                keys: Array.from(rawKeys, key => ({
-                    tag: typeof key.tag === 'bigint' ? Number(key.tag) : key.tag,
-                    payload: key.payload as Hex,
-                })),
-            });
-        }
-
-        output.push(operatorKeys);
-    }
-
-    return output;
 };
 
 export type { DriverReadArgsMap, DriverReadMethod };
