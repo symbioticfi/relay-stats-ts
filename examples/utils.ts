@@ -41,7 +41,10 @@ export function parseRpcUrls(raw: string | undefined): string[] {
     } catch {
         // fall through
     }
-    const split = raw.split(/[\n,]/).map(v => v.trim()).filter(Boolean);
+    const split = raw
+        .split(/[\n,]/)
+        .map(v => v.trim())
+        .filter(Boolean);
     return split.length > 0 ? split : DEFAULT_RPC_URLS;
 }
 

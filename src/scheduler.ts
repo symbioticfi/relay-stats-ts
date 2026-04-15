@@ -1,5 +1,10 @@
 import { encodePacked, keccak256 } from 'viem';
-import type { ActiveCommitterInfo, NetworkConfig, SchedulerInfo, ValidatorSet } from './types/index.js';
+import type {
+    ActiveCommitterInfo,
+    NetworkConfig,
+    SchedulerInfo,
+    ValidatorSet,
+} from './types/index.js';
 import { hashValidatorSet } from './validator_set.js';
 
 const ROLE_AGGREGATOR = 'AGGREGATOR';

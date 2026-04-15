@@ -47,10 +47,10 @@ pnpm run build && node dist/example.js
 
 ## Files
 
-| File | Purpose |
-|------|---------|
+| File         | Purpose                                                |
+| ------------ | ------------------------------------------------------ |
 | `example.ts` | Main example — deriver init, epoch snapshot, scheduler |
-| `utils.ts` | Shared helpers: env parsing, console UI |
+| `utils.ts`   | Shared helpers: env parsing, console UI                |
 
 ## FAQ
 

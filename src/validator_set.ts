@@ -99,9 +99,7 @@ const limitAndSortVaults = (validator: Validator): void => {
 
     validator.vaults = validator.vaults.slice(0, SSZ_MAX_VAULTS);
     validator.votingPower = validator.vaults.reduce((sum, vault) => sum + vault.votingPower, 0n);
-    validator.vaults.sort((a, b) =>
-        compareAddrsAsc(a.vault.toLowerCase(), b.vault.toLowerCase())
-    );
+    validator.vaults.sort((a, b) => compareAddrsAsc(a.vault.toLowerCase(), b.vault.toLowerCase()));
 };
 
 const applyValidatorKeys = (

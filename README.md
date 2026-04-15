@@ -113,6 +113,7 @@ if (active) {
 ```
 
 `getActiveCommitter` is a pure function — no RPC calls. Special cases:
+
 - `committerSlotDuration === 0` or single committer → always active
 - `currentTime < captureTimestamp` → returns `null`
 - Optional `graceSeconds` parameter for early next-slot activation
@@ -143,7 +144,10 @@ const logEvents = await deriver.getValSetLogEventsForEpochs({
     finalized: true,
 });
 logEvents.forEach(({ epoch, logs }) => {
-    console.log(epoch, logs.map(log => log.committed));
+    console.log(
+        epoch,
+        logs.map(log => log.committed)
+    );
 });
 
 const [starts, durations] = await Promise.all([

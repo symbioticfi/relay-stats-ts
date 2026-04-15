@@ -6,13 +6,7 @@ import {
     type NetworkConfig,
 } from '@symbioticfi/relay-stats-ts';
 import { fileURLToPath } from 'url';
-import {
-    ui,
-    parseRpcUrls,
-    parseChainId,
-    parseDriverAddress,
-    formatError,
-} from './utils.js';
+import { ui, parseRpcUrls, parseChainId, parseDriverAddress, formatError } from './utils.js';
 
 const rpcUrls = parseRpcUrls(process.env.RELAY_STATS_RPC_URLS);
 const driverChainId = parseChainId(process.env.RELAY_STATS_DRIVER_CHAIN_ID);
@@ -53,7 +47,7 @@ async function main() {
     for (const s of snapshots) {
         ui.bullet(
             `Epoch ${s.epoch}: ${s.validatorSet.validators.length} validators, ` +
-            `VP ${s.validatorSet.totalVotingPower}, status ${s.validatorSet.status}`
+                `VP ${s.validatorSet.totalVotingPower}, status ${s.validatorSet.status}`
         );
     }
 }
@@ -61,7 +55,10 @@ async function main() {
 function displayConfig(config: NetworkConfig) {
     ui.section('Network Config');
     ui.info('Voting Power Providers', config.votingPowerProviders.length);
-    ui.info('Keys Provider', `chain ${config.keysProvider.chainId} / ${config.keysProvider.address}`);
+    ui.info(
+        'Keys Provider',
+        `chain ${config.keysProvider.chainId} / ${config.keysProvider.address}`
+    );
     ui.info('Settlements', config.settlements.length);
     ui.info('Max Validators', config.maxValidatorsCount.toString());
     ui.info('Max Voting Power', config.maxVotingPower.toString());
@@ -82,11 +79,16 @@ function displayEpochSnapshot(snapshot: EpochData) {
     ui.info('Integrity', validatorSet.integrity);
 
     const top = [...validatorSet.validators]
-        .sort((a, b) => (b.votingPower > a.votingPower ? 1 : b.votingPower < a.votingPower ? -1 : 0))
+        .sort((a, b) =>
+            b.votingPower > a.votingPower ? 1 : b.votingPower < a.votingPower ? -1 : 0
+        )
         .slice(0, 5);
     ui.section('Top Operators');
     top.forEach((v, i) => {
-        ui.numbered(i + 1, `${v.operator} — ${v.votingPower} VP, ${v.vaults.length} vaults, ${v.keys.length} keys`);
+        ui.numbered(
+            i + 1,
+            `${v.operator} — ${v.votingPower} VP, ${v.vaults.length} vaults, ${v.keys.length} keys`
+        );
     });
 
     ui.section('Scheduler');
@@ -112,7 +114,7 @@ function displayEpochSnapshot(snapshot: EpochData) {
         for (const s of snapshot.settlementStatuses) {
             ui.bullet(
                 `chain ${s.settlement.chainId} / ${s.settlement.address}: ` +
-                `committed=${s.committed}, lastEpoch=${s.lastCommittedEpoch}`
+                    `committed=${s.committed}, lastEpoch=${s.lastCommittedEpoch}`
             );
         }
     }
@@ -121,7 +123,10 @@ function displayEpochSnapshot(snapshot: EpochData) {
         ui.section('Network Data');
         ui.info('Address', snapshot.networkData.address);
         ui.info('Subnetwork', snapshot.networkData.subnetwork);
-        ui.info('EIP-712', `${snapshot.networkData.eip712Data.name} v${snapshot.networkData.eip712Data.version}`);
+        ui.info(
+            'EIP-712',
+            `${snapshot.networkData.eip712Data.name} v${snapshot.networkData.eip712Data.version}`
+        );
     }
 }
 
