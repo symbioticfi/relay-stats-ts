@@ -14,13 +14,11 @@ import type {
 import { SSZ_MAX_VALIDATORS, SSZ_MAX_VAULTS, VALSET_VERSION } from './constants.js';
 import { sszTreeRoot } from './utils/ssz.js';
 
-/** @notice Sum voting power of active validators only. */
+/** @notice Sum voting power of all validators (the set contains only active validators). */
 export const totalActiveVotingPower = (validatorSet: ValidatorSet): bigint => {
     let total = 0n;
     for (const validator of validatorSet.validators) {
-        if (validator.isActive) {
-            total += validator.votingPower;
-        }
+        total += validator.votingPower;
     }
     return total;
 };
@@ -72,26 +70,36 @@ type ChainVotingPowers = {
     readonly votingPowers: readonly OperatorVotingPower[];
 };
 
+/** Descending by votingPower, ascending by address (lowercase) on tie. */
+const compareByPowerDesc = <T extends { votingPower: bigint }>(
+    left: T,
+    right: T,
+    leftAddr: string,
+    rightAddr: string
+): number => {
+    const diff = right.votingPower - left.votingPower;
+    if (diff > 0n) return 1;
+    if (diff < 0n) return -1;
+    return leftAddr.localeCompare(rightAddr);
+};
+
+const compareAddrsAsc = (a: string, b: string): number => a.localeCompare(b);
+
 const limitAndSortVaults = (validator: Validator): void => {
     if (validator.vaults.length <= SSZ_MAX_VAULTS) {
-        validator.vaults.sort((a, b) => a.vault.toLowerCase().localeCompare(b.vault.toLowerCase()));
+        validator.vaults.sort((a, b) =>
+            compareAddrsAsc(a.vault.toLowerCase(), b.vault.toLowerCase())
+        );
         return;
     }
 
-    validator.vaults.sort((left, right) => {
-        const diff = right.votingPower - left.votingPower;
-        if (diff !== 0n) {
-            if (diff > 0n) {
-                return 1;
-            }
-            return -1;
-        }
-        return left.vault.toLowerCase().localeCompare(right.vault.toLowerCase());
-    });
+    validator.vaults.sort((left, right) =>
+        compareByPowerDesc(left, right, left.vault.toLowerCase(), right.vault.toLowerCase())
+    );
 
     validator.vaults = validator.vaults.slice(0, SSZ_MAX_VAULTS);
     validator.votingPower = validator.vaults.reduce((sum, vault) => sum + vault.votingPower, 0n);
-    validator.vaults.sort((a, b) => a.vault.toLowerCase().localeCompare(b.vault.toLowerCase()));
+    validator.vaults.sort((a, b) => compareAddrsAsc(a.vault.toLowerCase(), b.vault.toLowerCase()));
 };
 
 const applyValidatorKeys = (
@@ -172,16 +180,9 @@ export const composeValidators = (
 
     let mappedValidators = Array.from(validators.values());
 
-    mappedValidators.sort((left, right) => {
-        const diff = right.votingPower - left.votingPower;
-        if (diff !== 0n) {
-            if (diff > 0n) {
-                return 1;
-            }
-            return -1;
-        }
-        return left.operator.toLowerCase().localeCompare(right.operator.toLowerCase());
-    });
+    mappedValidators.sort((left, right) =>
+        compareByPowerDesc(left, right, left.operator.toLowerCase(), right.operator.toLowerCase())
+    );
 
     if (mappedValidators.length > SSZ_MAX_VALIDATORS) {
         mappedValidators = mappedValidators.slice(0, SSZ_MAX_VALIDATORS);
@@ -190,7 +191,7 @@ export const composeValidators = (
     markValidatorsActive(config, mappedValidators);
 
     mappedValidators.sort((left, right) =>
-        left.operator.toLowerCase().localeCompare(right.operator.toLowerCase())
+        compareAddrsAsc(left.operator.toLowerCase(), right.operator.toLowerCase())
     );
 
     return mappedValidators;
@@ -244,8 +245,6 @@ export const buildValidatorSetFromData = async (
         getClient,
     } = params;
 
-    const timestampNumber = Number(epochStart);
-
     const validators = composeValidators(config, allVotingPowers, keys);
     if (includeCollateralMetadata) {
         await applyCollateralMetadata({
@@ -255,17 +254,19 @@ export const buildValidatorSetFromData = async (
         });
     }
 
-    const totalVotingPower = validators
-        .filter(validator => validator.isActive)
-        .reduce((sum, validator) => sum + validator.votingPower, 0n);
+    const activeValidators = validators.filter(v => v.isActive);
+    const totalVotingPower = activeValidators.reduce(
+        (sum, validator) => sum + validator.votingPower,
+        0n
+    );
     const quorumThreshold = calculateQuorumThreshold(config, totalVotingPower);
     const sortedRequiredTags = [...config.requiredKeyTags].sort((a, b) => a - b);
 
-    const baseValset: ValidatorSet = {
+    const internalValset: ValidatorSet = {
         version: VALSET_VERSION,
         requiredKeyTag: config.requiredHeaderKeyTag,
         epoch: targetEpoch,
-        captureTimestamp: timestampNumber,
+        captureTimestamp: Number(epochStart),
         quorumThreshold,
         validators,
         totalVotingPower,
@@ -274,8 +275,8 @@ export const buildValidatorSetFromData = async (
         extraData: [],
     };
 
-    const simpleExtra = buildSimpleExtraData(baseValset, sortedRequiredTags);
-    const zkExtra = await buildZkExtraData(baseValset, sortedRequiredTags);
+    const simpleExtra = buildSimpleExtraData(internalValset, sortedRequiredTags);
+    const zkExtra = await buildZkExtraData(internalValset, sortedRequiredTags);
 
     const combinedEntries = [...simpleExtra, ...zkExtra];
     const deduped = new Map<string, AggregatorExtraDataEntry>();
@@ -287,7 +288,8 @@ export const buildValidatorSetFromData = async (
     );
 
     return {
-        ...baseValset,
+        ...internalValset,
+        validators: activeValidators,
         extraData,
     };
 };
@@ -322,18 +324,18 @@ export const buildValidatorSet = async (
         getClient,
     } = params;
 
-    const timestampNumber = Number(epochStart);
+    const timestamp = Number(epochStart);
 
     const allVotingPowers: { chainId: number; votingPowers: OperatorVotingPower[] }[] = [];
     for (const provider of config.votingPowerProviders) {
-        const votingPowers = await getVotingPowers(provider, timestampNumber, finalized);
+        const votingPowers = await getVotingPowers(provider, timestamp, finalized);
         allVotingPowers.push({
             chainId: provider.chainId,
             votingPowers,
         });
     }
 
-    const keys = await getKeys(config.keysProvider, timestampNumber, finalized);
+    const keys = await getKeys(config.keysProvider, timestamp, finalized);
 
     return buildValidatorSetFromData({
         targetEpoch,
@@ -413,9 +415,25 @@ export const buildValidatorSetsBatch = async (
         number,
         { chainId: number; votingPowers: OperatorVotingPower[] }[]
     >();
-    for (const { provider, items } of votingRequests.values()) {
+
+    const votingFetches = Array.from(votingRequests.values()).map(async ({ provider, items }) => {
         const timestamps = items.map(item => item.timestamp);
         const results = await getVotingPowersBatch(provider, timestamps, finalized);
+        return { provider, items, results };
+    });
+
+    const keysFetches = Array.from(keysRequests.values()).map(async ({ provider, items }) => {
+        const timestamps = items.map(item => item.timestamp);
+        const results = await getKeysBatch(provider, timestamps, finalized);
+        return { items, results };
+    });
+
+    const [votingResults, keysResults] = await Promise.all([
+        Promise.all(votingFetches),
+        Promise.all(keysFetches),
+    ]);
+
+    for (const { provider, items, results } of votingResults) {
         for (let i = 0; i < items.length; i++) {
             const item = items[i];
             const perEpoch = votingPowersByEpoch.get(item.epoch);
@@ -433,31 +451,33 @@ export const buildValidatorSetsBatch = async (
     }
 
     const keysByEpoch = new Map<number, OperatorWithKeys[]>();
-    for (const { provider, items } of keysRequests.values()) {
-        const timestamps = items.map(item => item.timestamp);
-        const results = await getKeysBatch(provider, timestamps, finalized);
+    for (const { items, results } of keysResults) {
         for (let i = 0; i < items.length; i++) {
-            const item = items[i];
-            keysByEpoch.set(item.epoch, results[i] ?? []);
+            keysByEpoch.set(items[i].epoch, results[i] ?? []);
         }
     }
 
-    const results = new Map<number, ValidatorSet>();
-    for (const input of epochInputs) {
-        const allVotingPowers = votingPowersByEpoch.get(input.epoch) ?? [];
-        const keys = keysByEpoch.get(input.epoch) ?? [];
-        const validatorSet = await buildValidatorSetFromData({
-            targetEpoch: input.epoch,
-            finalized,
-            epochStart: input.epochStart,
-            config: input.config,
-            includeCollateralMetadata,
-            allVotingPowers,
-            keys,
-            getClient,
-        });
-        results.set(input.epoch, validatorSet);
-    }
+    const builtSets = await Promise.all(
+        epochInputs.map(async input => {
+            const allVotingPowers = votingPowersByEpoch.get(input.epoch) ?? [];
+            const keys = keysByEpoch.get(input.epoch) ?? [];
+            const validatorSet = await buildValidatorSetFromData({
+                targetEpoch: input.epoch,
+                finalized,
+                epochStart: input.epochStart,
+                config: input.config,
+                includeCollateralMetadata,
+                allVotingPowers,
+                keys,
+                getClient,
+            });
+            return { epoch: input.epoch, validatorSet };
+        })
+    );
 
+    const results = new Map<number, ValidatorSet>();
+    for (const { epoch, validatorSet } of builtSets) {
+        results.set(epoch, validatorSet);
+    }
     return results;
 };

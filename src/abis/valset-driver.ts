@@ -17,7 +17,11 @@ export const VALSET_DRIVER_ABI = [
                 components: [
                     { name: 'numAggregators', type: 'uint208', internalType: 'uint208' },
                     { name: 'numCommitters', type: 'uint208', internalType: 'uint208' },
-                    { name: 'configVersion', type: 'uint64', internalType: 'uint64' },
+                    {
+                        name: 'committerSlotDuration',
+                        type: 'uint48',
+                        internalType: 'uint48',
+                    },
                     {
                         name: 'votingPowerProviders',
                         type: 'tuple[]',

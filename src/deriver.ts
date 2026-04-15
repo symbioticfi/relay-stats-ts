@@ -1,5 +1,6 @@
 import { Address, Hex, PublicClient } from 'viem';
 import { SETTLEMENT_ABI } from './abis/index.js';
+import { getValidatorRoles } from './validator-roles.js';
 import {
     buildSettlementKey,
     buildSettlementStatusKey,
@@ -47,6 +48,7 @@ import type {
     NetworkData,
     OperatorVotingPower,
     OperatorWithKeys,
+    ValidatorRoles,
     SettlementValSetLog,
     SettlementValSetStatus,
     ValSetLogEvent,
@@ -422,6 +424,8 @@ export class ValidatorSetDeriver {
                 }
             }
 
+            const validatorRoles = getValidatorRoles(validatorSet, config);
+
             results.push({
                 epoch,
                 finalized,
@@ -432,10 +436,41 @@ export class ValidatorSetDeriver {
                 settlementStatuses,
                 valSetEvents,
                 aggregatorsExtraData,
+                validatorRoles,
             });
         }
 
         return results;
+    }
+
+    /** @notice Derive validator roles (aggregator/committer assignments) for a single epoch. */
+    public async getValidatorRoles(options?: {
+        epoch?: number;
+        finalized?: boolean;
+    }): Promise<ValidatorRoles> {
+        const results = await this.getValidatorRolesForEpochs({
+            epochRange:
+                options?.epoch !== undefined
+                    ? { from: options.epoch, to: options.epoch }
+                    : undefined,
+            finalized: options?.finalized,
+        });
+        if (results.length === 0) {
+            throw new Error('No validator roles available.');
+        }
+        return results[0].data;
+    }
+
+    /** @notice Derive validator roles for a range of epochs. */
+    public async getValidatorRolesForEpochs(options?: {
+        epochRange?: EpochRange;
+        finalized?: boolean;
+    }): Promise<{ epoch: number; data: ValidatorRoles }[]> {
+        const epochs = await this.getEpochsData({
+            epochRange: options?.epochRange,
+            finalized: options?.finalized,
+        });
+        return epochs.map(e => ({ epoch: e.epoch, data: e.validatorRoles }));
     }
 
     private async initializeClients(): Promise<void> {

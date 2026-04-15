@@ -14,6 +14,7 @@ export type RawQuorumThreshold = {
 export type RawDriverConfig = {
     numAggregators: bigint | number | string;
     numCommitters: bigint | number | string;
+    committerSlotDuration: bigint | number | string;
     votingPowerProviders: RawCrossChainAddress[];
     keysProvider: RawCrossChainAddress;
     settlements: RawCrossChainAddress[];
@@ -56,6 +57,7 @@ export const mapDriverConfig = (config: RawDriverConfig): NetworkConfig => ({
     })),
     numCommitters: Number(config.numCommitters),
     numAggregators: Number(config.numAggregators),
+    committerSlotDuration: Number(config.committerSlotDuration),
 });
 
 export const isCachedNetworkConfigEntry = (value: unknown): value is CachedNetworkConfigEntry => {

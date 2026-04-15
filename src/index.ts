@@ -3,6 +3,7 @@ export * from './deriver.js';
 export * from './constants.js';
 export * from './extra-data/index.js';
 export * from './validator_set.js';
+export * from './validator-roles.js';
 export * from './settlement.js';
 export * from './client.js';
 export * from './metadata.js';

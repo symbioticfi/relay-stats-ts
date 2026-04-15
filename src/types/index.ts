@@ -1,10 +1,12 @@
 export type {
+    ActiveCommitterInfo,
     CacheInterface,
     CrossChainAddress,
     Eip712Domain,
     EpochData,
     NetworkData,
     EpochRange,
+    ValidatorRoles,
 } from './common.js';
 export { KeyType, getKeyType } from './validator.js';
 export type {
