@@ -26,29 +26,41 @@ async function main() {
     const currentEpoch = await deriver.getCurrentEpoch();
     ui.info('Current Epoch', currentEpoch);
 
-    const config = await deriver.getCurrentNetworkConfig();
-    displayConfig(config);
+    try {
+        const config = await deriver.getCurrentNetworkConfig();
+        displayConfig(config);
+    } catch (error) {
+        ui.error(`Network config: ${formatError(error)}`);
+    }
 
-    const snapshot = await deriver.getEpochData({
-        epoch: currentEpoch,
-        finalized: true,
-        includeNetworkData: true,
-        includeValSetEvent: true,
-    });
-    displayEpochSnapshot(snapshot);
+    try {
+        const snapshot = await deriver.getEpochData({
+            epoch: currentEpoch,
+            finalized: true,
+            includeNetworkData: true,
+            includeValSetEvent: true,
+        });
+        displayEpochSnapshot(snapshot);
+    } catch (error) {
+        ui.error(`Epoch snapshot: ${formatError(error)}`);
+    }
 
-    const from = Math.max(1, currentEpoch - 2);
-    const snapshots = await deriver.getEpochsData({
-        epochRange: { from, to: currentEpoch },
-        finalized: true,
-    });
+    try {
+        const from = Math.max(1, currentEpoch - 2);
+        const snapshots = await deriver.getEpochsData({
+            epochRange: { from, to: currentEpoch },
+            finalized: true,
+        });
 
-    ui.section(`Epochs ${from}..${currentEpoch}`);
-    for (const s of snapshots) {
-        ui.bullet(
-            `Epoch ${s.epoch}: ${s.validatorSet.validators.length} validators, ` +
-                `VP ${s.validatorSet.totalVotingPower}, status ${s.validatorSet.status}`
-        );
+        ui.section(`Epochs ${from}..${currentEpoch}`);
+        for (const s of snapshots) {
+            ui.bullet(
+                `Epoch ${s.epoch}: ${s.validatorSet.validators.length} validators, ` +
+                    `VP ${s.validatorSet.totalVotingPower}, status ${s.validatorSet.status}`
+            );
+        }
+    } catch (error) {
+        ui.error(`Epoch range: ${formatError(error)}`);
     }
 }
 
