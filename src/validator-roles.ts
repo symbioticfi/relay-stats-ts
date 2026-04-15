@@ -2,7 +2,7 @@ import { encodePacked, keccak256 } from 'viem';
 import type {
     ActiveCommitterInfo,
     NetworkConfig,
-    SchedulerInfo,
+    ValidatorRoles,
     ValidatorSet,
 } from './types/index.js';
 import { hashValidatorSet } from './validator_set.js';
@@ -19,10 +19,10 @@ const ROLE_COMMITTER = 'COMMITTER';
  *
  * All returned indices reference `validatorSet.validators`.
  */
-export const getSchedulerInfo = (
+export const getValidatorRoles = (
     validatorSet: ValidatorSet,
     config: NetworkConfig
-): SchedulerInfo => {
+): ValidatorRoles => {
     const headerHash = hashValidatorSet(validatorSet);
     const validatorCount = validatorSet.validators.length;
 

@@ -1,6 +1,6 @@
 import { Address, Hex, PublicClient } from 'viem';
 import { SETTLEMENT_ABI } from './abis/index.js';
-import { getSchedulerInfo } from './scheduler.js';
+import { getValidatorRoles } from './validator-roles.js';
 import {
     buildSettlementKey,
     buildSettlementStatusKey,
@@ -48,7 +48,7 @@ import type {
     NetworkData,
     OperatorVotingPower,
     OperatorWithKeys,
-    SchedulerInfo,
+    ValidatorRoles,
     SettlementValSetLog,
     SettlementValSetStatus,
     ValSetLogEvent,
@@ -424,7 +424,7 @@ export class ValidatorSetDeriver {
                 }
             }
 
-            const schedulerInfo = getSchedulerInfo(validatorSet, config);
+            const validatorRoles = getValidatorRoles(validatorSet, config);
 
             results.push({
                 epoch,
@@ -436,19 +436,19 @@ export class ValidatorSetDeriver {
                 settlementStatuses,
                 valSetEvents,
                 aggregatorsExtraData,
-                schedulerInfo,
+                validatorRoles,
             });
         }
 
         return results;
     }
 
-    /** @notice Derive scheduler info (aggregator/committer assignments) for a single epoch. */
-    public async getSchedulerInfo(options?: {
+    /** @notice Derive validator roles (aggregator/committer assignments) for a single epoch. */
+    public async getValidatorRoles(options?: {
         epoch?: number;
         finalized?: boolean;
-    }): Promise<SchedulerInfo> {
-        const results = await this.getSchedulerInfoForEpochs({
+    }): Promise<ValidatorRoles> {
+        const results = await this.getValidatorRolesForEpochs({
             epochRange:
                 options?.epoch !== undefined
                     ? { from: options.epoch, to: options.epoch }
@@ -456,21 +456,21 @@ export class ValidatorSetDeriver {
             finalized: options?.finalized,
         });
         if (results.length === 0) {
-            throw new Error('No scheduler info available.');
+            throw new Error('No validator roles available.');
         }
         return results[0].data;
     }
 
-    /** @notice Derive scheduler info for a range of epochs. */
-    public async getSchedulerInfoForEpochs(options?: {
+    /** @notice Derive validator roles for a range of epochs. */
+    public async getValidatorRolesForEpochs(options?: {
         epochRange?: EpochRange;
         finalized?: boolean;
-    }): Promise<{ epoch: number; data: SchedulerInfo }[]> {
+    }): Promise<{ epoch: number; data: ValidatorRoles }[]> {
         const epochs = await this.getEpochsData({
             epochRange: options?.epochRange,
             finalized: options?.finalized,
         });
-        return epochs.map(e => ({ epoch: e.epoch, data: e.schedulerInfo }));
+        return epochs.map(e => ({ epoch: e.epoch, data: e.validatorRoles }));
     }
 
     private async initializeClients(): Promise<void> {

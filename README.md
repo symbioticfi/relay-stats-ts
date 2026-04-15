@@ -51,7 +51,7 @@ console.log(`Integrity: ${validatorSet.integrity}`);
 
 ### Single-call epoch snapshot
 
-`getEpochData` pulls the validator set, scheduler info, network metadata, settlement statuses, log events, and aggregator extras in one request:
+`getEpochData` pulls the validator set, validator roles, network metadata, settlement statuses, log events, and aggregator extras in one request:
 
 ```ts
 const snapshot = await deriver.getEpochData({
@@ -61,10 +61,10 @@ const snapshot = await deriver.getEpochData({
     includeValSetEvent: true,
 });
 
-const { validatorSet, schedulerInfo, config } = snapshot;
+const { validatorSet, validatorRoles, config } = snapshot;
 console.log(validatorSet.status, validatorSet.validators.length);
-console.log('aggregators:', schedulerInfo.aggregatorIndices);
-console.log('committers:', schedulerInfo.committerIndices);
+console.log('aggregators:', validatorRoles.aggregatorIndices);
+console.log('committers:', validatorRoles.committerIndices);
 ```
 
 ### Batch epoch snapshots
@@ -78,28 +78,28 @@ const snapshots = await deriver.getEpochsData({
 });
 
 snapshots.forEach(s => {
-    console.log(s.epoch, s.validatorSet.status, s.schedulerInfo.aggregatorIndices);
+    console.log(s.epoch, s.validatorSet.status, s.validatorRoles.aggregatorIndices);
 });
 ```
 
 Batch helpers use multicall to minimize RPCs when available.
 
-### Scheduler (aggregator & committer roles)
+### Validator Roles (aggregator & committer assignments)
 
-Each epoch deterministically assigns aggregator and committer roles to active validators. The scheduler info is included in every `EpochData` snapshot. It is also available standalone:
+Each epoch deterministically assigns aggregator and committer roles to active validators. The validator roles are included in every `EpochData` snapshot. They are also available standalone:
 
 ```ts
 import { getActiveCommitter } from '@symbioticfi/relay-stats-ts';
 
-const schedulerInfo = await deriver.getSchedulerInfo({ epoch: currentEpoch });
+const validatorRoles = await deriver.getValidatorRoles({ epoch: currentEpoch });
 
 // indices into validatorSet.validators
-const aggregators = schedulerInfo.aggregatorIndices.map(i => validatorSet.validators[i]);
-const committers = schedulerInfo.committerIndices.map(i => validatorSet.validators[i]);
+const aggregators = validatorRoles.aggregatorIndices.map(i => validatorSet.validators[i]);
+const committers = validatorRoles.committerIndices.map(i => validatorSet.validators[i]);
 
 // who is the active committer right now (round-robin time slots)
 const active = getActiveCommitter({
-    committerIndices: schedulerInfo.committerIndices,
+    committerIndices: validatorRoles.committerIndices,
     captureTimestamp: validatorSet.captureTimestamp,
     currentTime: Math.floor(Date.now() / 1000),
     committerSlotDuration: config.committerSlotDuration,
@@ -223,16 +223,16 @@ const deriver = await ValidatorSetDeriver.create({
 All exports live under `@symbioticfi/relay-stats-ts`. Key entry points:
 
 - `ValidatorSetDeriver.create(config)` – initialize clients (one per chain) and validate required RPC coverage.
-- `getEpochData({ epoch?, finalized?, ... })` – single snapshot with validator set, scheduler info, optional network metadata, aggregator extras, settlement statuses, and per-settlement log events.
+- `getEpochData({ epoch?, finalized?, ... })` – single snapshot with validator set, validator roles, optional network metadata, aggregator extras, settlement statuses, and per-settlement log events.
 - `getEpochsData({ epochRange?, finalized?, ... })` – batch snapshot (array) in ascending order with the same shape as `getEpochData`.
 - `getValidatorSet(epoch?, finalized?)` / `getNetworkConfig(epoch?, finalized?)` / `getNetworkData(settlement?, finalized?)` – granular primitives, plus batch variants `getValidatorSets(epochRange?)` and `getNetworkConfigs(epochRange?)`.
-- `getSchedulerInfo({ epoch?, finalized? })` / `getSchedulerInfoForEpochs({ epochRange?, finalized? })` – deterministic aggregator/committer role assignments.
+- `getValidatorRoles({ epoch?, finalized? })` / `getValidatorRolesForEpochs({ epochRange?, finalized? })` – deterministic aggregator/committer role assignments.
 - `getActiveCommitter(params)` – pure helper returning the currently active committer with slot boundaries.
 - `getEpochStart(epoch)` / `getEpochDuration(epoch)` – driver timing helpers, plus batch variants.
 - `getValSetStatus(epoch)` / `getValSetSettlementStatuses(...)` / `getValSetLogEvents(...)` – settlement state and events, plus batch variants.
 - `getAggregatorsExtraData(mode, ...)` / `getAggregatorsExtraDataForEpochs(...)` – simple/zk aggregator payloads.
 - Utilities: `getTotalActiveVotingPower`, `getValidatorSetHeader`, `abiEncodeValidatorSetHeader`, `hashValidatorSetHeader`, `getValidatorSetHeaderHash`.
-- Low-level re-exports: `buildSimpleExtraData`, `buildZkExtraData`, `getSchedulerInfo`, SSZ utilities (`serializeValidatorSet`, `getValidatorSetRoot`, etc.).
+- Low-level re-exports: `buildSimpleExtraData`, `buildZkExtraData`, `getValidatorRoles`, SSZ utilities (`serializeValidatorSet`, `getValidatorSetRoot`, etc.).
 
 Refer to `src/types/` for full type definitions.
 

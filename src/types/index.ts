@@ -6,7 +6,7 @@ export type {
     EpochData,
     NetworkData,
     EpochRange,
-    SchedulerInfo,
+    ValidatorRoles,
 } from './common.js';
 export { KeyType, getKeyType } from './validator.js';
 export type {

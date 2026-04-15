@@ -69,7 +69,7 @@ function displayConfig(config: NetworkConfig) {
 }
 
 function displayEpochSnapshot(snapshot: EpochData) {
-    const { validatorSet, schedulerInfo, config } = snapshot;
+    const { validatorSet, validatorRoles, config } = snapshot;
 
     ui.section(`Epoch ${snapshot.epoch} Validator Set`);
     ui.info('Validators', validatorSet.validators.length);
@@ -92,12 +92,12 @@ function displayEpochSnapshot(snapshot: EpochData) {
     });
 
     ui.section('Scheduler');
-    displayRoleAssignments('Aggregators', schedulerInfo.aggregatorIndices, validatorSet);
-    displayRoleAssignments('Committers', schedulerInfo.committerIndices, validatorSet);
+    displayRoleAssignments('Aggregators', validatorRoles.aggregatorIndices, validatorSet);
+    displayRoleAssignments('Committers', validatorRoles.committerIndices, validatorSet);
 
     const now = Math.floor(Date.now() / 1000);
     const active = getActiveCommitter({
-        committerIndices: schedulerInfo.committerIndices,
+        committerIndices: validatorRoles.committerIndices,
         captureTimestamp: validatorSet.captureTimestamp,
         currentTime: now,
         committerSlotDuration: config.committerSlotDuration,
