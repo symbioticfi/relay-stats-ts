@@ -1,5 +1,6 @@
 import { Address, Hex, PublicClient } from 'viem';
 import { SETTLEMENT_ABI } from './abis/index.js';
+import { getSchedulerInfo } from './scheduler.js';
 import {
     buildSettlementKey,
     buildSettlementStatusKey,
@@ -47,6 +48,7 @@ import type {
     NetworkData,
     OperatorVotingPower,
     OperatorWithKeys,
+    SchedulerInfo,
     SettlementValSetLog,
     SettlementValSetStatus,
     ValSetLogEvent,
@@ -422,6 +424,8 @@ export class ValidatorSetDeriver {
                 }
             }
 
+            const schedulerInfo = getSchedulerInfo(validatorSet, config);
+
             results.push({
                 epoch,
                 finalized,
@@ -432,10 +436,41 @@ export class ValidatorSetDeriver {
                 settlementStatuses,
                 valSetEvents,
                 aggregatorsExtraData,
+                schedulerInfo,
             });
         }
 
         return results;
+    }
+
+    /** @notice Derive scheduler info (aggregator/committer assignments) for a single epoch. */
+    public async getSchedulerInfo(options?: {
+        epoch?: number;
+        finalized?: boolean;
+    }): Promise<SchedulerInfo> {
+        const results = await this.getSchedulerInfoForEpochs({
+            epochRange:
+                options?.epoch !== undefined
+                    ? { from: options.epoch, to: options.epoch }
+                    : undefined,
+            finalized: options?.finalized,
+        });
+        if (results.length === 0) {
+            throw new Error('No scheduler info available.');
+        }
+        return results[0].data;
+    }
+
+    /** @notice Derive scheduler info for a range of epochs. */
+    public async getSchedulerInfoForEpochs(options?: {
+        epochRange?: EpochRange;
+        finalized?: boolean;
+    }): Promise<{ epoch: number; data: SchedulerInfo }[]> {
+        const epochs = await this.getEpochsData({
+            epochRange: options?.epochRange,
+            finalized: options?.finalized,
+        });
+        return epochs.map(e => ({ epoch: e.epoch, data: e.schedulerInfo }));
     }
 
     private async initializeClients(): Promise<void> {

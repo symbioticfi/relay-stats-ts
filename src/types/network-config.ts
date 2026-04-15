@@ -20,4 +20,5 @@ export interface NetworkConfig {
     quorumThresholds: QuorumThreshold[];
     numCommitters: number;
     numAggregators: number;
+    committerSlotDuration: number;
 }

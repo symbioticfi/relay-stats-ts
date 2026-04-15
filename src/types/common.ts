@@ -38,6 +38,7 @@ export interface EpochData {
     settlementStatuses?: SettlementValSetStatus[];
     valSetEvents?: SettlementValSetLog[];
     aggregatorsExtraData?: AggregatorExtraDataEntry[];
+    schedulerInfo: SchedulerInfo;
 }
 
 /** @notice Cache contract used by the deriver to persist finalized data. */
@@ -52,4 +53,23 @@ export interface CacheInterface {
 export interface EpochRange {
     from: number;
     to: number;
+}
+
+/**
+ * @notice Scheduler role assignments for the epoch.
+ * All indices reference `validatorSet.validators` (which contains only active validators).
+ */
+export interface SchedulerInfo {
+    aggregatorIndices: number[];
+    committerIndices: number[];
+}
+
+/**
+ * @notice Active committer slot information at a given point in time.
+ * `validatorIndex` references `validatorSet.validators`.
+ */
+export interface ActiveCommitterInfo {
+    validatorIndex: number;
+    slotStart: number;
+    slotEnd: number;
 }
