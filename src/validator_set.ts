@@ -115,15 +115,27 @@ const applyValidatorKeys = (
     }
 };
 
+/** @notice A validator must hold at least one key and every configured required key tag. */
+const hasRequiredKeys = (validator: Validator, requiredKeyTags: readonly number[]): boolean => {
+    if (validator.keys.length === 0) return false;
+    if (requiredKeyTags.length === 0) return true;
+    const availableTags = new Set(validator.keys.map(key => key.tag));
+    return requiredKeyTags.every(tag => availableTags.has(tag));
+};
+
 const markValidatorsActive = (config: NetworkConfig, validators: Validator[]): void => {
     let totalActive = 0;
 
     for (const validator of validators) {
+        if (validator.votingPower === 0n) {
+            break;
+        }
+
         if (validator.votingPower < config.minInclusionVotingPower) {
             break;
         }
 
-        if (validator.keys.length === 0) {
+        if (!hasRequiredKeys(validator, config.requiredKeyTags)) {
             continue;
         }
 

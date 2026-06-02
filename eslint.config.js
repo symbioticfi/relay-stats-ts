@@ -48,6 +48,9 @@ const config = [
     },
     {
         ignores: [
+            // Claude Code (local worktrees & state)
+            '.claude/',
+
             // Dependencies
             'node_modules/',
             'pnpm-lock.yaml',
