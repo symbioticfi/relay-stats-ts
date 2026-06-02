@@ -1,4 +1,4 @@
-import { encodePacked, keccak256 } from 'viem';
+import { concat, hexToBytes, keccak256, stringToBytes, toBytes } from 'viem';
 import type {
     ActiveCommitterInfo,
     NetworkConfig,
@@ -29,33 +29,30 @@ export const getValidatorRoles = (
     const assignRoles = (role: string, count: number): number[] => {
         if (validatorCount === 0 || count === 0) return [];
 
-        const assigned: number[] = [];
         const occupied = new Set<number>();
         const validatorCountBig = BigInt(validatorCount);
 
         for (let i = 1; i <= count; i++) {
+            // keccak256(role || headerHash || i) with i as minimal big-endian
+            // bytes — mirrors the Go reference (big.Int(i).Bytes()), not a
+            // fixed-width uint256.
             const hash = keccak256(
-                encodePacked(['string', 'bytes32', 'uint256'], [role, headerHash, BigInt(i)])
+                concat([stringToBytes(role), hexToBytes(headerHash), toBytes(BigInt(i))])
             );
             const startIndex = Number(BigInt(hash) % validatorCountBig);
 
-            let found = false;
             for (let offset = 0; offset < validatorCount; offset++) {
                 const probeIndex = (startIndex + offset) % validatorCount;
                 if (!occupied.has(probeIndex)) {
                     occupied.add(probeIndex);
-                    assigned.push(probeIndex);
-                    found = true;
                     break;
                 }
             }
-
-            if (!found) {
-                assigned.push(startIndex);
-            }
         }
 
-        return assigned;
+        // Return indices sorted ascending to match relay v1.1.1 (#454): the
+        // proof bitmap only yields sorted values when unpacked.
+        return [...occupied].sort((a, b) => a - b);
     };
 
     return {
