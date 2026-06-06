@@ -114,6 +114,9 @@ if (active) {
 
 `getActiveCommitter` is a pure function — no RPC calls. Special cases:
 
+Derived validator sets expose active validators as `validatorSet.validators`; when inactive validators
+exist, `validatorSet.allValidators` carries the full set used for Relay header hashing.
+
 - `committerSlotDuration === 0` or single committer → always active
 - `currentTime < captureTimestamp` → returns `null`
 - Optional `graceSeconds` parameter for early next-slot activation

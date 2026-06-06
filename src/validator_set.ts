@@ -14,10 +14,18 @@ import type {
 import { SSZ_MAX_VALIDATORS, SSZ_MAX_VAULTS, VALSET_VERSION } from './constants.js';
 import { sszTreeRoot } from './utils/ssz.js';
 
-/** @notice Sum voting power of all validators (the set contains only active validators). */
+/** @notice Full validator set, including inactive validators when available. */
+export const getAllValidators = (validatorSet: ValidatorSet): readonly Validator[] =>
+    validatorSet.allValidators ?? validatorSet.validators;
+
+/** @notice Active validators in the scheduler/signature order. */
+export const getActiveValidators = (validatorSet: ValidatorSet): readonly Validator[] =>
+    getAllValidators(validatorSet).filter(validator => validator.isActive);
+
+/** @notice Sum voting power of active validators. */
 export const totalActiveVotingPower = (validatorSet: ValidatorSet): bigint => {
     let total = 0n;
-    for (const validator of validatorSet.validators) {
+    for (const validator of getActiveValidators(validatorSet)) {
         total += validator.votingPower;
     }
     return total;
@@ -302,6 +310,7 @@ export const buildValidatorSetFromData = async (
     return {
         ...internalValset,
         validators: activeValidators,
+        allValidators: validators,
         extraData,
     };
 };

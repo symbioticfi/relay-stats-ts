@@ -1,14 +1,17 @@
 import type { Hex } from 'viem';
 import type { Validator } from './validator.js';
 
-/** @notice Full validator set payload (governed by the driver). */
+/** @notice Validator set payload derived from the driver. */
 export interface ValidatorSet {
     version: number;
     requiredKeyTag: number;
     epoch: number;
     captureTimestamp: number;
     quorumThreshold: bigint;
+    /** Active validators, sorted by operator address. */
     validators: Validator[];
+    /** Full validator set, including inactive validators, when available. */
+    allValidators?: Validator[];
     totalVotingPower: bigint;
     status: 'committed' | 'pending' | 'missing';
     integrity: 'valid' | 'invalid';

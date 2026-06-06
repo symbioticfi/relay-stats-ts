@@ -579,7 +579,10 @@ export class ValidatorSetDeriver {
     private isValidatorSet(value: unknown): value is ValidatorSet {
         if (!value || typeof value !== 'object') return false;
         const candidate = value as ValidatorSet;
-        return Array.isArray(candidate.validators);
+        return (
+            Array.isArray(candidate.validators) &&
+            (candidate.allValidators === undefined || Array.isArray(candidate.allValidators))
+        );
     }
 
     private isAggregatorExtraCacheEntry(
@@ -943,7 +946,7 @@ export class ValidatorSetDeriver {
         const results = new Map<number, ValidatorSet>();
         const missingEpochs: number[] = [];
         const cacheValidator = (value: unknown): value is ValidatorSet =>
-            this.isValidatorSet(value);
+            this.isValidatorSet(value) && Array.isArray(value.allValidators);
 
         if (finalized) {
             const cachedSets = await Promise.all(
