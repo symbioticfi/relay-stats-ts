@@ -5,7 +5,7 @@ import type {
     ValidatorRoles,
     ValidatorSet,
 } from './types/index.js';
-import { hashValidatorSet } from './validator_set.js';
+import { getActiveValidators, hashValidatorSet } from './validator_set.js';
 
 const ROLE_AGGREGATOR = 'AGGREGATOR';
 const ROLE_COMMITTER = 'COMMITTER';
@@ -17,14 +17,15 @@ const ROLE_COMMITTER = 'COMMITTER';
  * start index into the validator list, then performs a linear probe to find
  * the first unoccupied validator (wrap-around).
  *
- * All returned indices reference `validatorSet.validators`.
+ * All returned indices reference the active validator order. For validator
+ * sets returned by this package, that is `validatorSet.validators`.
  */
 export const getValidatorRoles = (
     validatorSet: ValidatorSet,
     config: NetworkConfig
 ): ValidatorRoles => {
     const headerHash = hashValidatorSet(validatorSet);
-    const validatorCount = validatorSet.validators.length;
+    const validatorCount = getActiveValidators(validatorSet).length;
 
     const assignRoles = (role: string, count: number): number[] => {
         if (validatorCount === 0 || count === 0) return [];

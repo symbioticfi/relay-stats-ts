@@ -57,7 +57,8 @@ export interface EpochRange {
 
 /**
  * @notice Validator role assignments (aggregators and committers) for the epoch.
- * All indices reference `validatorSet.validators` (which contains only active validators).
+ * All indices reference the active validator order. For validator sets derived
+ * by this package, that is `validatorSet.validators`.
  */
 export interface ValidatorRoles {
     aggregatorIndices: number[];
